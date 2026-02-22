@@ -1,5 +1,5 @@
 # =============================================================================
-# agentic-assistant configuration
+# herald configuration
 # =============================================================================
 # Environment variables can be referenced with ${VAR_NAME} syntax.
 # Copy this file to assistant.toml and fill in your values.

@@ -38,8 +38,8 @@ use crate::provider_wrapper::DynamicProvider;
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "agentic-assistant")]
-#[command(about = "A Discord AI assistant built on the agentic library")]
+#[command(name = "herald")]
+#[command(about = "A self-hostable AI assistant built on orra")]
 #[command(version)]
 struct Cli {
     /// Path to the configuration file.
@@ -497,7 +497,7 @@ async fn main() {
         }
         // Discord-only mode: wait for Ctrl+C
         eprintln!();
-        eprintln!("=== {} — agentic-assistant v{} ===", default_agent_name, env!("CARGO_PKG_VERSION"));
+        eprintln!("=== {} — herald v{} ===", default_agent_name, env!("CARGO_PKG_VERSION"));
         eprintln!("Press Ctrl+C to stop.");
         eprintln!();
         tokio::signal::ctrl_c().await.expect("failed to listen for ctrl+c");
@@ -543,7 +543,7 @@ async fn main() {
 
     // --- Start ---
     eprintln!();
-    eprintln!("=== {} — agentic-assistant v{} ===", default_agent_name, env!("CARGO_PKG_VERSION"));
+    eprintln!("=== {} — herald v{} ===", default_agent_name, env!("CARGO_PKG_VERSION"));
     eprintln!("[init] web UI: http://{}:{}", config.gateway.host, config.gateway.port);
 
     if !dynamic_provider.is_configured() {

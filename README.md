@@ -1,6 +1,6 @@
-# agentic-assistant
+# herald
 
-A Discord bot powered by the [agentic](https://github.com/jereanon/agentic) library. Supports Claude and OpenAI models.
+A self-hostable AI assistant with web UI, Discord bot, scheduled tasks, and multi-agent support. Built on [orra](https://github.com/jereanon/orra).
 
 ## Setup
 

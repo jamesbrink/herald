@@ -1,8 +1,8 @@
 [package]
-name = "agentic-assistant"
-version = "0.2.0"
+name = "herald"
+version = "0.0.1"
 edition = "2021"
-description = "A Discord-based AI assistant built on the agentic library"
+description = "A self-hostable AI assistant with web UI, Discord bot, scheduled tasks, and multi-agent support. Built on orra."
 license = "MIT"
 
 [dependencies]

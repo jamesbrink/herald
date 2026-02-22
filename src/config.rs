@@ -493,7 +493,7 @@ pub struct McpServerConfig {
     pub env: std::collections::HashMap<String, String>,
 }
 
-/// Federation config for connecting multiple agentic-assistant instances.
+/// Federation config for connecting multiple herald instances.
 ///
 /// Wire protocol (future implementation):
 /// - Peers discover each other's agents via `GET /api/federation/agents`
