@@ -42,6 +42,17 @@ in
       description = "Group under which Herald runs.";
     };
 
+    claudeCredentialsFile = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = ''
+        Path to a Claude CLI credentials file (.credentials.json).
+        When set, Herald reads the OAuth token from this file at startup,
+        removing the need to manually enter an API key. Typically points
+        at another user's credentials, e.g. "/home/youruser/.claude/.credentials.json".
+      '';
+    };
+
     environmentFile = mkOption {
       type = types.nullOr types.path;
       default = null;

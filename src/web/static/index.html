@@ -1356,7 +1356,22 @@
     <div class="setup-overlay hidden" id="setupOverlay">
         <div class="setup-card">
             <h1>Welcome to Herald</h1>
-            <p>To get started, configure your LLM provider. You can use a Claude or OpenAI API key.</p>
+            <p>Let's get you set up. You can always change these in Settings later.</p>
+
+            <div class="setup-field">
+                <label for="setupUserName">Your Name</label>
+                <input type="text" id="setupUserName" placeholder="User">
+            </div>
+
+            <div class="setup-field">
+                <label for="setupAssistantName">Assistant Name</label>
+                <input type="text" id="setupAssistantName" placeholder="Herald">
+            </div>
+
+            <hr style="border:none;border-top:1px solid var(--border);margin:18px 0 14px">
+            <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                LLM provider configuration (optional &mdash; can be set up later in Settings)
+            </p>
 
             <div class="setup-field">
                 <label for="setupApiKey">API Key</label>
@@ -1381,7 +1396,7 @@
                 <input type="text" id="setupApiUrl" placeholder="https://api.openai.com/v1">
             </div>
 
-            <button class="setup-btn" id="setupBtn" onclick="submitSetup()">Configure &amp; Start</button>
+            <button class="setup-btn" id="setupBtn" onclick="submitSetup()">Get Started</button>
             <div class="setup-error" id="setupError"></div>
         </div>
     </div>
@@ -3823,6 +3838,25 @@ mdns_enabled = true</pre>
                 // Populate model dropdown
                 populateModelSelect(currentProviderType, currentDefaultModel);
 
+                // Pre-fill setup form with existing user name
+                if (userDisplayName) {
+                    document.getElementById('setupUserName').value = userDisplayName;
+                }
+
+                // Pre-fill setup form with current default agent name
+                try {
+                    const authHeaders = {};
+                    if (apiKey) authHeaders['Authorization'] = `Bearer ${apiKey}`;
+                    const agentsResp = await fetch('/api/agents', { headers: authHeaders });
+                    if (agentsResp.ok) {
+                        const agents = await agentsResp.json();
+                        const localAgents = agents.filter(a => !a.remote);
+                        if (localAgents.length > 0) {
+                            document.getElementById('setupAssistantName').value = localAgents[0].name;
+                        }
+                    }
+                } catch (e) { /* ignore, placeholder will show */ }
+
                 return data.provider_configured;
             } catch (e) {
                 return false;
@@ -3878,48 +3912,97 @@ mdns_enabled = true</pre>
             const errEl = document.getElementById('setupError');
             errEl.style.display = 'none';
 
-            const apiKey = document.getElementById('setupApiKey').value.trim();
-            if (!apiKey) {
-                errEl.textContent = 'Please enter an API key.';
+            const userName = document.getElementById('setupUserName').value.trim();
+            if (!userName) {
+                errEl.textContent = 'Please enter your name.';
+                errEl.style.display = 'block';
+                return;
+            }
+
+            const assistantName = document.getElementById('setupAssistantName').value.trim();
+            if (!assistantName) {
+                errEl.textContent = 'Please enter an assistant name.';
                 errEl.style.display = 'block';
                 return;
             }
 
             btn.disabled = true;
-            btn.textContent = 'Configuring...';
-
-            const body = {
-                api_key: apiKey,
-                provider_type: document.getElementById('setupProviderType').value,
-            };
-
-            const model = document.getElementById('setupModel').value.trim();
-            if (model) body.model = model;
-
-            const apiUrl = document.getElementById('setupApiUrl').value.trim();
-            if (apiUrl) body.api_url = apiUrl;
+            btn.textContent = 'Setting up...';
 
             try {
-                const headers = { 'Content-Type': 'application/json' };
-                if (window.apiKeyForAuth) headers['Authorization'] = `Bearer ${window.apiKeyForAuth}`;
+                const authHeaders = {};
+                if (window.apiKeyForAuth) authHeaders['Authorization'] = `Bearer ${window.apiKeyForAuth}`;
 
-                const resp = await fetch('/api/config', {
-                    method: 'POST',
-                    headers,
-                    body: JSON.stringify(body),
-                });
+                // Save user display name to localStorage
+                userDisplayName = userName;
+                localStorage.setItem('agentic_user_name', userName);
 
-                const data = await resp.json();
-
-                if (resp.ok && data.success) {
-                    providerConfigured = true;
-                    document.getElementById('setupOverlay').classList.add('hidden');
-                    connectWebSocket();
-                    loadSessions();
-                } else {
-                    errEl.textContent = data.error || 'Configuration failed.';
-                    errEl.style.display = 'block';
+                // Rename the default agent to the chosen assistant name
+                const agentsResp = await fetch('/api/agents', { headers: authHeaders });
+                if (agentsResp.ok) {
+                    const agents = await agentsResp.json();
+                    const localAgents = agents.filter(a => !a.remote);
+                    if (localAgents.length > 0) {
+                        const defaultAgent = localAgents[0];
+                        if (defaultAgent.name !== assistantName) {
+                            const renameResp = await fetch(`/api/agents/${encodeURIComponent(defaultAgent.name)}`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json', ...authHeaders },
+                                body: JSON.stringify({
+                                    name: assistantName,
+                                    personality: defaultAgent.personality,
+                                }),
+                            });
+                            if (!renameResp.ok) {
+                                const err = await renameResp.json();
+                                errEl.textContent = err.error || 'Failed to set assistant name.';
+                                errEl.style.display = 'block';
+                                btn.disabled = false;
+                                btn.textContent = 'Get Started';
+                                return;
+                            }
+                        }
+                    }
                 }
+
+                // Optionally configure the LLM provider if an API key was provided
+                const apiKey = document.getElementById('setupApiKey').value.trim();
+                if (apiKey) {
+                    const body = {
+                        api_key: apiKey,
+                        provider_type: document.getElementById('setupProviderType').value,
+                    };
+
+                    const model = document.getElementById('setupModel').value.trim();
+                    if (model) body.model = model;
+
+                    const apiUrl = document.getElementById('setupApiUrl').value.trim();
+                    if (apiUrl) body.api_url = apiUrl;
+
+                    const resp = await fetch('/api/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...authHeaders },
+                        body: JSON.stringify(body),
+                    });
+
+                    const data = await resp.json();
+                    if (resp.ok && data.success) {
+                        providerConfigured = true;
+                    } else {
+                        errEl.textContent = data.error || 'Provider configuration failed.';
+                        errEl.style.display = 'block';
+                        btn.disabled = false;
+                        btn.textContent = 'Get Started';
+                        return;
+                    }
+                }
+
+                // Mark setup as completed
+                localStorage.setItem('herald_setup_completed', 'true');
+                document.getElementById('setupOverlay').classList.add('hidden');
+                connectWebSocket();
+                await loadSessions();
+                loadAgentSelector();
             } catch (e) {
                 errEl.textContent = `Connection error: ${e.message}`;
                 errEl.style.display = 'block';
@@ -3949,8 +4032,17 @@ mdns_enabled = true</pre>
         });
 
         (async function init() {
-            const configured = await checkStatus();
-            if (configured) {
+            // Always check server status (populates provider info, model dropdown, etc.)
+            await checkStatus();
+
+            const setupCompleted = localStorage.getItem('herald_setup_completed') === 'true';
+
+            if (setupCompleted || providerConfigured) {
+                // If provider auto-detected (e.g. Claude CLI credentials), skip setup
+                if (!setupCompleted && providerConfigured) {
+                    localStorage.setItem('herald_setup_completed', 'true');
+                }
+
                 document.getElementById('setupOverlay').classList.add('hidden');
                 connectWebSocket();
                 await loadSessions();

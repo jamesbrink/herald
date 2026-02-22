@@ -826,7 +826,11 @@ pub(crate) fn read_claude_cli_credentials() -> Option<String> {
 
 // ---- Credentials file backend (Linux / universal fallback) ----------------
 
-/// Read Claude CLI credentials from `~/.claude/.credentials.json`.
+/// Read Claude CLI credentials from a JSON file.
+///
+/// Checks the following locations in order:
+/// 1. `CLAUDE_CREDENTIALS_FILE` env var (explicit path override)
+/// 2. `~/.claude/.credentials.json` (default Claude CLI location on Linux)
 ///
 /// On Linux (and Windows), Claude Code writes OAuth tokens to this JSON file
 /// instead of using a system keychain. The format is identical to the macOS
@@ -835,10 +839,14 @@ pub(crate) fn read_claude_cli_credentials() -> Option<String> {
 /// {"claudeAiOauth":{"accessToken":"sk-ant-oat01-...","refreshToken":"...","expiresAt":...}}
 /// ```
 fn read_claude_cli_credentials_file() -> Option<String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()?;
-    let creds_path = PathBuf::from(&home).join(".claude").join(".credentials.json");
+    let creds_path = if let Ok(explicit) = std::env::var("CLAUDE_CREDENTIALS_FILE") {
+        PathBuf::from(explicit)
+    } else {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
+        PathBuf::from(&home).join(".claude").join(".credentials.json")
+    };
 
     let json_str = std::fs::read_to_string(&creds_path).ok()?;
     let json_str = json_str.trim();

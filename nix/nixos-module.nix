@@ -51,6 +51,8 @@ in
         # Override data_dir so Herald writes state to the expected location
         # regardless of what the config file says.
         HERALD_DATA_DIR = cfg.dataDir;
+      } // lib.optionalAttrs (cfg.claudeCredentialsFile != null) {
+        CLAUDE_CREDENTIALS_FILE = cfg.claudeCredentialsFile;
       } // cfg.extraEnvironment;
 
       serviceConfig = {
@@ -67,7 +69,7 @@ in
 
         # Hardening
         ProtectSystem = "strict";
-        ProtectHome = true;
+        ProtectHome = lib.mkDefault (cfg.claudeCredentialsFile == null);
         PrivateTmp = true;
         NoNewPrivileges = true;
         ReadWritePaths = [ cfg.dataDir ];

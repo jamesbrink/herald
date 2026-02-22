@@ -44,6 +44,8 @@ in
 
         EnvironmentVariables = {
           HERALD_DATA_DIR = cfg.dataDir;
+        } // lib.optionalAttrs (cfg.claudeCredentialsFile != null) {
+          CLAUDE_CREDENTIALS_FILE = cfg.claudeCredentialsFile;
         } // cfg.extraEnvironment;
       };
     };
