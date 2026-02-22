@@ -495,30 +495,75 @@ pub struct McpServerConfig {
 
 /// Federation config for connecting multiple herald instances.
 ///
-/// Wire protocol (future implementation):
-/// - Peers discover each other's agents via `GET /api/federation/agents`
-/// - Messages forwarded via `POST /api/federation/relay`
-/// - Authentication via shared secret or per-peer API keys
-/// - Each peer exposes its agent list so remote agents appear as delegation targets
-#[derive(Debug, Deserialize)]
+/// When enabled, herald instances discover each other's agents and can route
+/// requests to the best-suited instance. Peers communicate via:
+/// - `GET /api/federation/agents` — discover remote agents
+/// - `POST /api/federation/relay` — forward messages to remote agents
+/// - `GET /api/federation/health` — health checks
+///
+/// Authentication uses a shared secret (bearer token). Discovery can be
+/// automatic via mDNS on the local network, or manual via static peer config.
+#[derive(Debug, Clone, Deserialize)]
 pub struct FederationConfig {
     /// Enable federation with other instances.
     #[serde(default)]
     pub enabled: bool,
-    /// Remote peer instances to connect to.
+
+    /// Human-readable name for this instance. Appears in session labels and
+    /// peer discovery. Defaults to the machine hostname.
+    #[serde(default = "default_instance_name")]
+    pub instance_name: String,
+
+    /// Global shared secret for federation authentication. Required when
+    /// federation is enabled (unless every peer has its own `shared_secret`).
+    pub shared_secret: Option<String>,
+
+    /// Port for the federation HTTP API. Defaults to `gateway.port + 1`.
+    /// Only used when federation is enabled.
+    pub port: Option<u16>,
+
+    /// Enable mDNS discovery on the local network (`_herald._tcp.local.`).
+    #[serde(default = "default_true")]
+    pub mdns_enabled: bool,
+
+    /// Agent names to expose to peers. Empty list = expose all agents.
+    #[serde(default)]
+    pub exposed_agents: Vec<String>,
+
+    /// Remote peer instances to connect to (static configuration).
     #[serde(default)]
     pub peers: Vec<FederationPeerConfig>,
-    /// Shared secret for federation authentication.
-    pub shared_secret: Option<String>,
+}
+
+fn default_instance_name() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "herald".into())
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for FederationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            peers: Vec::new(),
+            instance_name: default_instance_name(),
             shared_secret: None,
+            port: None,
+            mdns_enabled: true,
+            exposed_agents: Vec::new(),
+            peers: Vec::new(),
         }
+    }
+}
+
+impl FederationConfig {
+    /// Resolve the federation port. Falls back to `gateway_port + 1`.
+    pub fn resolve_port(&self, gateway_port: u16) -> u16 {
+        self.port.unwrap_or(gateway_port + 1)
     }
 }
 
@@ -526,10 +571,11 @@ impl Default for FederationConfig {
 pub struct FederationPeerConfig {
     /// Display name for this peer.
     pub name: String,
-    /// URL of the remote instance (e.g. "https://other-instance:8080").
+    /// URL of the remote instance (e.g. "http://other-machine:8081").
     pub url: String,
-    /// Optional API key for authenticating with this peer.
-    pub api_key: Option<String>,
+    /// Per-peer shared secret. Overrides the global `shared_secret` when
+    /// communicating with this specific peer.
+    pub shared_secret: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -568,18 +614,14 @@ impl Config {
         if !config.has_provider_key() {
             if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
                 if !key.is_empty() {
-                    eprintln!(
-                        "[config] Auto-detected ANTHROPIC_API_KEY from environment"
-                    );
+                    eprintln!("[config] Auto-detected ANTHROPIC_API_KEY from environment");
                     config.provider.api_key = Some(key);
                 }
             }
         }
         if !config.has_provider_key() {
             if let Some(key) = read_claude_cli_credentials() {
-                eprintln!(
-                    "[config] Auto-detected API key from Claude CLI credentials"
-                );
+                eprintln!("[config] Auto-detected API key from Claude CLI credentials");
                 config.provider.api_key = Some(key);
             }
         }
@@ -652,6 +694,30 @@ impl Config {
                     "provider.provider_type must be \"claude\" or \"openai\", got \"{}\"",
                     other
                 )));
+            }
+        }
+
+        // Federation: require a shared secret when enabled
+        if self.federation.enabled {
+            let has_global = self
+                .federation
+                .shared_secret
+                .as_deref()
+                .is_some_and(|s| !s.is_empty() && !s.starts_with("${"));
+
+            let all_peers_have_secret = !self.federation.peers.is_empty()
+                && self.federation.peers.iter().all(|p| {
+                    p.shared_secret
+                        .as_deref()
+                        .is_some_and(|s| !s.is_empty() && !s.starts_with("${"))
+                });
+
+            if !has_global && !all_peers_have_secret {
+                return Err(ConfigError::Validation(
+                    "federation.shared_secret is required when federation is enabled \
+                     (or each peer must have its own shared_secret)"
+                        .into(),
+                ));
             }
         }
 
@@ -744,8 +810,10 @@ fn try_keychain_account(account: &str) -> Option<String> {
     let output = std::process::Command::new("security")
         .args([
             "find-generic-password",
-            "-s", "Claude Code-credentials",
-            "-a", account,
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            account,
             "-w",
         ])
         .output()
@@ -817,10 +885,13 @@ fn refresh_oauth_token(
     let output = std::process::Command::new("curl")
         .args([
             "-s",
-            "-X", "POST",
+            "-X",
+            "POST",
             "https://console.anthropic.com/v1/oauth/token",
-            "-H", "Content-Type: application/x-www-form-urlencoded",
-            "-d", &body,
+            "-H",
+            "Content-Type: application/x-www-form-urlencoded",
+            "-d",
+            &body,
         ])
         .output()
         .ok()?;
@@ -834,7 +905,10 @@ fn refresh_oauth_token(
 
     let new_access = resp.get("access_token")?.as_str()?;
     let new_refresh = resp.get("refresh_token")?.as_str()?;
-    let expires_in = resp.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(28800);
+    let expires_in = resp
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(28800);
 
     // Calculate new expiry
     let now_ms = std::time::SystemTime::now()
@@ -857,23 +931,31 @@ fn refresh_oauth_token(
     let _ = std::process::Command::new("security")
         .args([
             "delete-generic-password",
-            "-s", "Claude Code-credentials",
-            "-a", account,
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            account,
         ])
         .output();
 
     let add_result = std::process::Command::new("security")
         .args([
             "add-generic-password",
-            "-s", "Claude Code-credentials",
-            "-a", account,
-            "-w", &updated_json,
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            account,
+            "-w",
+            &updated_json,
         ])
         .output()
         .ok()?;
 
     if add_result.status.success() {
-        eprintln!("[config] OAuth token refreshed successfully (expires in {}h)", expires_in / 3600);
+        eprintln!(
+            "[config] OAuth token refreshed successfully (expires in {}h)",
+            expires_in / 3600
+        );
         Some(new_access.to_string())
     } else {
         // Keychain update failed, but we still have a valid token for this session
@@ -990,10 +1072,8 @@ pub(crate) fn save_discord_settings(
                 filter_replaced = true;
             }
             if trimmed.starts_with("allowed_users") || trimmed.starts_with("# allowed_users") {
-                let users_toml: Vec<String> = allowed_users
-                    .iter()
-                    .map(|u| format!("\"{}\"", u))
-                    .collect();
+                let users_toml: Vec<String> =
+                    allowed_users.iter().map(|u| format!("\"{}\"", u)).collect();
                 lines[i] = format!("allowed_users = [{}]", users_toml.join(", "));
                 users_replaced = true;
             }
@@ -1010,10 +1090,7 @@ pub(crate) fn save_discord_settings(
 
     let mut insertions = Vec::new();
     if !users_replaced {
-        let users_toml: Vec<String> = allowed_users
-            .iter()
-            .map(|u| format!("\"{}\"", u))
-            .collect();
+        let users_toml: Vec<String> = allowed_users.iter().map(|u| format!("\"{}\"", u)).collect();
         insertions.push(format!("allowed_users = [{}]", users_toml.join(", ")));
     }
     if !filter_replaced {
@@ -1067,7 +1144,11 @@ pub(crate) fn save_agents(path: &Path, agents: &[AgentProfileConfig]) -> Result<
     }
 
     // Remove trailing blank lines
-    while result_lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+    while result_lines
+        .last()
+        .map(|l| l.trim().is_empty())
+        .unwrap_or(false)
+    {
         result_lines.pop();
     }
 
@@ -1076,13 +1157,19 @@ pub(crate) fn save_agents(path: &Path, agents: &[AgentProfileConfig]) -> Result<
         result_lines.push(String::new());
         result_lines.push("[[agents]]".to_string());
         result_lines.push(format!("name = \"{}\"", agent.name));
-        result_lines.push(format!("personality = \"{}\"", agent.personality.replace('"', "\\\"")));
+        result_lines.push(format!(
+            "personality = \"{}\"",
+            agent.personality.replace('"', "\\\"")
+        ));
         if let Some(ref prompt) = agent.system_prompt {
             // Use triple-quoted string for multi-line prompts
             if prompt.contains('\n') {
                 result_lines.push(format!("system_prompt = \"\"\"{}\"\"\"", prompt));
             } else {
-                result_lines.push(format!("system_prompt = \"{}\"", prompt.replace('"', "\\\"")));
+                result_lines.push(format!(
+                    "system_prompt = \"{}\"",
+                    prompt.replace('"', "\\\"")
+                ));
             }
         }
         if let Some(ref model) = agent.model {
@@ -1109,7 +1196,10 @@ pub(crate) fn read_discord_token(path: &Path) -> Result<Option<String>, ConfigEr
 
     let expanded = substitute_env_vars(&content);
     let config: Config = toml::from_str(&expanded)?;
-    Ok(config.discord.token.filter(|t| !t.is_empty() && !t.starts_with("${")))
+    Ok(config
+        .discord
+        .token
+        .filter(|t| !t.is_empty() && !t.starts_with("${")))
 }
 
 // ---------------------------------------------------------------------------

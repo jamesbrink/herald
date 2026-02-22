@@ -198,3 +198,32 @@ log_metrics = false
 # -----------------------------------------------------------------------------
 [logging]
 level = "info"
+
+# -----------------------------------------------------------------------------
+# Federation (multi-instance)
+# -----------------------------------------------------------------------------
+# Connect multiple herald instances so they can discover each other's agents
+# and route requests to the best-suited instance. When enabled, session names
+# include the instance name for clarity.
+#
+# Authentication: a shared_secret is required (global or per-peer).
+# Discovery: mDNS auto-discovers peers on the local network. Static peers
+# are checked on a 60-second interval regardless of mDNS.
+[federation]
+enabled = false
+# Human-readable name for this instance (defaults to hostname)
+# instance_name = "work-herald"
+# Shared secret for federation authentication (bearer token)
+# shared_secret = "${FEDERATION_SECRET}"
+# Port for the federation API (defaults to gateway.port + 1)
+# port = 8081
+# Auto-discover peers on the local network via mDNS
+mdns_enabled = true
+# Agent names to expose to peers (empty = expose all)
+# exposed_agents = ["Atlas", "CodeBot"]
+
+# Static peer configuration (in addition to mDNS discovery)
+# [[federation.peers]]
+# name = "home-herald"
+# url = "http://192.168.1.50:8081"
+# shared_secret = "peer-specific-secret"  # overrides global shared_secret

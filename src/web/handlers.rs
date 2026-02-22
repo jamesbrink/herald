@@ -116,10 +116,7 @@ pub async fn configure_provider(
         .as_deref()
         .unwrap_or(&state.config_provider_type);
 
-    let model = request
-        .model
-        .as_deref()
-        .unwrap_or(&state.config_model);
+    let model = request.model.as_deref().unwrap_or(&state.config_model);
 
     let api_url = request
         .api_url
@@ -195,12 +192,12 @@ pub struct SessionInfo {
     pub updated_at: String,
     pub working_directory: Option<String>,
     pub chaos_mode: bool,
+    /// Instance name (populated when federation is enabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
-pub async fn list_sessions(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = check_auth(&state, &headers) {
         return e.into_response();
     }
@@ -227,6 +224,11 @@ pub async fn list_sessions(
                         .get("chaos_mode")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
+                    let instance = state
+                        .federation_service
+                        .as_ref()
+                        .map(|f| f.instance_name().to_string());
+
                     sessions.push(SessionInfo {
                         namespace: ns.key(),
                         name,
@@ -235,6 +237,7 @@ pub async fn list_sessions(
                         updated_at: session.updated_at.to_rfc3339(),
                         working_directory,
                         chaos_mode,
+                        instance,
                     });
                 }
             }
@@ -332,11 +335,7 @@ pub async fn delete_session(
 
     let ns = Namespace::parse(&id);
     match state.store.delete(&ns).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "deleted": true })),
-        )
-            .into_response(),
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "deleted": true }))).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -360,10 +359,7 @@ pub async fn delete_session(
 // GET /api/settings
 // ---------------------------------------------------------------------------
 
-pub async fn get_settings(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn get_settings(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = check_auth(&state, &headers) {
         return e.into_response();
     }
@@ -418,10 +414,7 @@ pub async fn update_provider(
         .as_deref()
         .unwrap_or(&state.config_provider_type);
 
-    let model = request
-        .model
-        .as_deref()
-        .unwrap_or(&state.config_model);
+    let model = request.model.as_deref().unwrap_or(&state.config_model);
 
     let api_url = request
         .api_url
@@ -498,11 +491,11 @@ pub async fn update_discord(
     // Get current state as defaults
     let current = state.discord_manager.state().await;
 
-    let token = request.token.as_deref()
-        .filter(|t| !t.is_empty());
-    let filter = request.filter.as_deref()
-        .unwrap_or(&current.filter);
-    let allowed_users = request.allowed_users.as_ref()
+    let token = request.token.as_deref().filter(|t| !t.is_empty());
+    let filter = request.filter.as_deref().unwrap_or(&current.filter);
+    let allowed_users = request
+        .allowed_users
+        .as_ref()
         .unwrap_or(&current.allowed_users);
 
     // Validate filter
@@ -524,7 +517,10 @@ pub async fn update_discord(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: format!("filter must be \"mentions\", \"all\", or \"dm\", got \"{}\"", other),
+                    error: format!(
+                        "filter must be \"mentions\", \"all\", or \"dm\", got \"{}\"",
+                        other
+                    ),
                     code: "bad_request".into(),
                 }),
             )
@@ -548,11 +544,7 @@ pub async fn update_discord(
     }
 
     // Save filter/allowed_users to config file
-    if let Err(e) = config::save_discord_settings(
-        &state.config_path,
-        filter,
-        allowed_users,
-    ) {
+    if let Err(e) = config::save_discord_settings(&state.config_path, filter, allowed_users) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -569,7 +561,9 @@ pub async fn update_discord(
         Some(tok.to_string())
     } else {
         // Try to read the current token from the config file
-        config::read_discord_token(&state.config_path).ok().flatten()
+        config::read_discord_token(&state.config_path)
+            .ok()
+            .flatten()
     };
 
     if let Some(tok) = connect_token {
@@ -580,12 +574,16 @@ pub async fn update_discord(
         }
 
         // Connect (or reconnect) to Discord
-        match state.discord_manager.connect(
-            &tok,
-            filter,
-            allowed_users.clone(),
-            &current.namespace_prefix,
-        ).await {
+        match state
+            .discord_manager
+            .connect(
+                &tok,
+                filter,
+                allowed_users.clone(),
+                &current.namespace_prefix,
+            )
+            .await
+        {
             Ok(()) => {
                 eprintln!("[settings] Discord reconnected with new settings");
                 (
@@ -655,8 +653,7 @@ pub async fn detect_provider(
 
     // Try Claude CLI credentials
     if let Some(key) = config::read_claude_cli_credentials() {
-        let provider: Arc<dyn Provider> =
-            Arc::new(ClaudeProvider::new(&key, &state.config_model));
+        let provider: Arc<dyn Provider> = Arc::new(ClaudeProvider::new(&key, &state.config_model));
         state.dynamic_provider.swap(provider).await;
 
         let mut auth = state.auth_source.write().await;
@@ -695,10 +692,7 @@ pub struct ChannelInfo {
     pub group: String,
 }
 
-pub async fn list_channels(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = check_auth(&state, &headers) {
         return e.into_response();
     }
@@ -764,9 +758,7 @@ pub async fn list_channels(
                         .send()
                         .await
                     {
-                        if let Ok(discord_channels) =
-                            resp.json::<Vec<DiscordChannel>>().await
-                        {
+                        if let Ok(discord_channels) = resp.json::<Vec<DiscordChannel>>().await {
                             for ch in discord_channels {
                                 // Only include text-based channels
                                 let type_name = match ch.channel_type {
@@ -994,11 +986,7 @@ pub async fn delete_cron_job(
     };
 
     match svc.delete_job(&id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "deleted": true })),
-        )
-            .into_response(),
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "deleted": true }))).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1164,11 +1152,7 @@ pub async fn pause_cron_job(
     };
 
     match svc.pause_job(&id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "paused": true })),
-        )
-            .into_response(),
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "paused": true }))).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1216,11 +1200,7 @@ pub async fn resume_cron_job(
     };
 
     match svc.resume_job(&id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "resumed": true })),
-        )
-            .into_response(),
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "resumed": true }))).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1494,7 +1474,10 @@ pub async fn list_directories(
         (path.to_path_buf(), String::new())
     } else {
         // User is typing a name — filter children of the parent
-        let parent = path.parent().unwrap_or(std::path::Path::new("/")).to_path_buf();
+        let parent = path
+            .parent()
+            .unwrap_or(std::path::Path::new("/"))
+            .to_path_buf();
         let prefix = path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -1544,7 +1527,11 @@ pub async fn list_directories(
     dirs.sort();
     dirs.truncate(20);
 
-    (StatusCode::OK, Json(serde_json::json!({ "directories": dirs }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "directories": dirs })),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1552,44 +1539,67 @@ pub async fn list_directories(
 // ---------------------------------------------------------------------------
 
 fn parse_schedule_from_json(v: &serde_json::Value) -> Result<CronScheduleType, String> {
-    let stype = v.get("type").and_then(|v| v.as_str()).ok_or("missing schedule.type")?;
+    let stype = v
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or("missing schedule.type")?;
     match stype {
         "at" => {
-            let dt_str = v.get("datetime").and_then(|v| v.as_str())
+            let dt_str = v
+                .get("datetime")
+                .and_then(|v| v.as_str())
                 .ok_or("missing schedule.datetime")?;
-            let dt: chrono::DateTime<chrono::Utc> = dt_str.parse()
+            let dt: chrono::DateTime<chrono::Utc> = dt_str
+                .parse()
                 .map_err(|e| format!("invalid datetime: {}", e))?;
             Ok(CronScheduleType::At { datetime: dt })
         }
         "every" => {
-            let ms = v.get("interval_ms").and_then(|v| v.as_u64())
+            let ms = v
+                .get("interval_ms")
+                .and_then(|v| v.as_u64())
                 .ok_or("missing schedule.interval_ms")?;
             Ok(CronScheduleType::Every { interval_ms: ms })
         }
         "cron" => {
-            let expr = v.get("expression").and_then(|v| v.as_str())
+            let expr = v
+                .get("expression")
+                .and_then(|v| v.as_str())
                 .ok_or("missing schedule.expression")?;
             // Validate
             orra::scheduler::CronSchedule::parse(expr)
                 .map_err(|e| format!("invalid cron: {}", e))?;
-            Ok(CronScheduleType::Cron { expression: expr.into() })
+            Ok(CronScheduleType::Cron {
+                expression: expr.into(),
+            })
         }
         _ => Err(format!("unknown schedule type: {}", stype)),
     }
 }
 
 fn parse_payload_from_json(v: &serde_json::Value) -> Result<CronPayload, String> {
-    let ptype = v.get("type").and_then(|v| v.as_str()).ok_or("missing payload.type")?;
+    let ptype = v
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or("missing payload.type")?;
     match ptype {
         "agent_turn" => {
-            let prompt = v.get("prompt").and_then(|v| v.as_str())
+            let prompt = v
+                .get("prompt")
+                .and_then(|v| v.as_str())
                 .ok_or("missing payload.prompt")?;
-            Ok(CronPayload::AgentTurn { prompt: prompt.into() })
+            Ok(CronPayload::AgentTurn {
+                prompt: prompt.into(),
+            })
         }
         "system_event" => {
-            let message = v.get("message").and_then(|v| v.as_str())
+            let message = v
+                .get("message")
+                .and_then(|v| v.as_str())
                 .ok_or("missing payload.message")?;
-            Ok(CronPayload::SystemEvent { message: message.into() })
+            Ok(CronPayload::SystemEvent {
+                message: message.into(),
+            })
         }
         _ => Err(format!("unknown payload type: {}", ptype)),
     }
@@ -1607,16 +1617,13 @@ pub struct AgentRequest {
     pub model: Option<String>,
 }
 
-pub async fn list_agents(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = check_auth(&state, &headers) {
         return e.into_response();
     }
 
     let profiles = state.agent_profiles.read().await;
-    let agents: Vec<serde_json::Value> = profiles
+    let mut agents: Vec<serde_json::Value> = profiles
         .iter()
         .map(|a| {
             serde_json::json!({
@@ -1627,6 +1634,20 @@ pub async fn list_agents(
             })
         })
         .collect();
+
+    // Include remote agents from federation
+    if let Some(ref fed) = state.federation_service {
+        let remote = fed.registry().remote_agents().await;
+        for ra in remote {
+            agents.push(serde_json::json!({
+                "name": ra.name,
+                "personality": ra.personality,
+                "model": ra.model,
+                "remote": true,
+                "instance": ra.instance,
+            }));
+        }
+    }
 
     (StatusCode::OK, Json(agents)).into_response()
 }
@@ -1662,7 +1683,9 @@ pub async fn create_agent(
 
     let profile = config::AgentProfileConfig {
         name,
-        personality: request.personality.unwrap_or_else(|| "friendly, helpful, and concise".into()),
+        personality: request
+            .personality
+            .unwrap_or_else(|| "friendly, helpful, and concise".into()),
         system_prompt: request.system_prompt,
         model: request.model,
     };
@@ -1700,10 +1723,15 @@ pub async fn update_agent(
     // Check for name conflicts when renaming
     if is_rename {
         let profiles = state.agent_profiles.read().await;
-        if profiles.iter().any(|a| a.name.eq_ignore_ascii_case(&new_name)) {
+        if profiles
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case(&new_name))
+        {
             return (
                 StatusCode::CONFLICT,
-                Json(serde_json::json!({ "error": format!("agent '{}' already exists", new_name) })),
+                Json(
+                    serde_json::json!({ "error": format!("agent '{}' already exists", new_name) }),
+                ),
             )
                 .into_response();
         }
@@ -1711,7 +1739,9 @@ pub async fn update_agent(
 
     {
         let mut profiles = state.agent_profiles.write().await;
-        let agent = profiles.iter_mut().find(|a| a.name.eq_ignore_ascii_case(&name));
+        let agent = profiles
+            .iter_mut()
+            .find(|a| a.name.eq_ignore_ascii_case(&name));
 
         match agent {
             Some(a) => {

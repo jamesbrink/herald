@@ -27,11 +27,7 @@ pub async fn ws_handler(
 ) -> impl IntoResponse {
     // Check auth before upgrade
     if !state.gateway.authenticate(extract_bearer(&headers)) {
-        return (
-            axum::http::StatusCode::UNAUTHORIZED,
-            "unauthorized",
-        )
-            .into_response();
+        return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
 
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -91,6 +87,47 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             format!("web:{}", uuid::Uuid::new_v4())
                         });
                         let ns = Namespace::parse(&ns_key);
+
+                        // Check for @peer:agent pattern (federation direct routing)
+                        if let Some(ref fed) = state.federation_service {
+                            if let Some(remote_match) = detect_remote_agent_mention(&message, fed).await {
+                                let result_tx = result_tx.clone();
+                                let ns_key_clone = ns_key.clone();
+                                let instance_name = fed.instance_name().to_string();
+
+                                tokio::spawn(async move {
+                                    let request = orra::channels::federation::RelayRequest {
+                                        agent: remote_match.agent_name.clone(),
+                                        message: remote_match.cleaned_message.clone(),
+                                        source_peer: instance_name,
+                                        source_agent: None,
+                                        namespace: format!("federation:web:{}", uuid::Uuid::new_v4()),
+                                    };
+
+                                    let ws_msg = match crate::federation::client::PeerClient::relay_message(
+                                        &remote_match.peer_url,
+                                        &remote_match.peer_secret,
+                                        &request,
+                                    ).await {
+                                        Ok(resp) => WsMessage::Response {
+                                            message: resp.message,
+                                            namespace: ns_key_clone,
+                                            usage: ChatUsage {
+                                                input_tokens: 0,
+                                                output_tokens: 0,
+                                                total_tokens: 0,
+                                            },
+                                            agent: Some(format!("{}:{}", resp.instance, resp.agent)),
+                                        },
+                                        Err(e) => WsMessage::Error {
+                                            error: format!("Remote relay failed: {e}"),
+                                        },
+                                    };
+                                    let _ = result_tx.send(ws_msg).await;
+                                });
+                                continue;
+                            }
+                        }
 
                         // If no agent was explicitly selected, check for @mentions
                         let (resolved_agent, cleaned_message) = if agent.is_some() {
@@ -269,7 +306,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 async fn resolve_runtime(
     state: &AppState,
     agent: Option<&str>,
-) -> (Arc<orra::runtime::Runtime<orra::context::CharEstimator>>, Option<String>) {
+) -> (
+    Arc<orra::runtime::Runtime<orra::context::CharEstimator>>,
+    Option<String>,
+) {
     let runtimes = state.runtimes.read().await;
 
     if runtimes.is_empty() {
@@ -295,12 +335,65 @@ async fn resolve_runtime(
     (state.runtime.clone(), None)
 }
 
-async fn send_ws_msg(
-    socket: &mut WebSocket,
-    msg: &WsMessage,
-) -> Result<(), axum::Error> {
+async fn send_ws_msg(socket: &mut WebSocket, msg: &WsMessage) -> Result<(), axum::Error> {
     let json = serde_json::to_string(msg).unwrap_or_default();
-    socket
-        .send(WsRawMessage::Text(json.into()))
-        .await
+    socket.send(WsRawMessage::Text(json.into())).await
+}
+
+// ---------------------------------------------------------------------------
+// Federation: @peer:agent detection
+// ---------------------------------------------------------------------------
+
+struct RemoteAgentMatch {
+    agent_name: String,
+    peer_url: String,
+    peer_secret: String,
+    cleaned_message: String,
+}
+
+/// Detect `@peer:agent` pattern at the start of a message and look up the
+/// remote agent in the federation registry.
+async fn detect_remote_agent_mention(
+    message: &str,
+    federation: &crate::federation::FederationService,
+) -> Option<RemoteAgentMatch> {
+    let trimmed = message.trim();
+
+    // Match @peer:agent at start of message
+    if !trimmed.starts_with('@') {
+        return None;
+    }
+
+    // Extract the @peer:agent token
+    let token_end = trimmed
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(trimmed.len());
+    let token = &trimmed[1..token_end]; // strip leading @
+
+    // Must contain exactly one ':'
+    let (peer_name, agent_name) = token.split_once(':')?;
+    if peer_name.is_empty() || agent_name.is_empty() {
+        return None;
+    }
+
+    // Look up in registry
+    let (url, secret, _info) = federation
+        .registry()
+        .find_agent(Some(peer_name), agent_name)
+        .await?;
+
+    let cleaned = trimmed[token_end..].trim().to_string();
+    let cleaned = if cleaned.is_empty() {
+        // If no message after the mention, use the whole thing
+        trimmed.to_string()
+    } else {
+        cleaned
+    };
+
+    Some(RemoteAgentMatch {
+        agent_name: agent_name.to_string(),
+        peer_url: url,
+        peer_secret: secret,
+        cleaned_message: cleaned,
+    })
 }

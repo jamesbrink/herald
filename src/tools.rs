@@ -119,7 +119,9 @@ pub fn register_all(
             max_turns: config.tools.claude_code_max_turns,
             timeout_secs: config.tools.claude_code_timeout_secs,
             skip_permissions: config.tools.claude_code_skip_permissions,
-            working_directory: config.tools.claude_code_working_directory
+            working_directory: config
+                .tools
+                .claude_code_working_directory
                 .as_ref()
                 .map(std::path::PathBuf::from),
         };

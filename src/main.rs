@@ -1,5 +1,6 @@
 mod config;
 mod discord_manager;
+mod federation;
 mod hooks;
 mod identity;
 mod provider_wrapper;
@@ -16,10 +17,10 @@ use orra::context::{CharEstimator, ContextBudget};
 use orra::cron::service::CronService;
 use orra::cron::store::FileCronStore;
 use orra::cron::types::CronPayload;
-use orra::message::Message;
-use orra::namespace::Namespace;
 use orra::hook::HookRegistry;
+use orra::message::Message;
 use orra::metrics::MetricsCollector;
+use orra::namespace::Namespace;
 use orra::policy::PolicyRegistry;
 use orra::provider::Provider;
 use orra::providers::claude::ClaudeProvider;
@@ -71,34 +72,66 @@ async fn main() {
     if cli.check {
         eprintln!("Configuration is valid.");
         eprintln!("  Agent: {}", config.agent.name);
-        eprintln!("  Provider: {} ({})", config.provider.provider_type, config.provider.model);
-        eprintln!("  Provider key: {}", if config.has_provider_key() { "configured" } else { "not set (use web UI)" });
-        eprintln!("  Discord: {}", if config.has_discord_token() {
-            format!("enabled (filter: {})", config.discord.filter)
-        } else {
-            "disabled (no token)".into()
-        });
-        eprintln!("  Session store: {}", config.sessions.store);
-        eprintln!("  Memory: {}", if config.memory.enabled { "enabled" } else { "disabled" });
-        eprintln!("  Gateway: {}", if config.gateway.enabled {
-            format!("{}:{}", config.gateway.host, config.gateway.port)
-        } else {
-            "disabled".into()
-        });
-        eprintln!("  Scheduler: {}", if config.scheduler.enabled {
-            format!("{} jobs", config.scheduler.jobs.len())
-        } else {
-            "disabled".into()
-        });
         eprintln!(
-            "  Tools: {}",
-            enabled_tools_summary(&config)
+            "  Provider: {} ({})",
+            config.provider.provider_type, config.provider.model
         );
-        eprintln!("  MCP servers: {}", if config.mcp.servers.is_empty() {
-            "(none)".into()
-        } else {
-            config.mcp.servers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
-        });
+        eprintln!(
+            "  Provider key: {}",
+            if config.has_provider_key() {
+                "configured"
+            } else {
+                "not set (use web UI)"
+            }
+        );
+        eprintln!(
+            "  Discord: {}",
+            if config.has_discord_token() {
+                format!("enabled (filter: {})", config.discord.filter)
+            } else {
+                "disabled (no token)".into()
+            }
+        );
+        eprintln!("  Session store: {}", config.sessions.store);
+        eprintln!(
+            "  Memory: {}",
+            if config.memory.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        eprintln!(
+            "  Gateway: {}",
+            if config.gateway.enabled {
+                format!("{}:{}", config.gateway.host, config.gateway.port)
+            } else {
+                "disabled".into()
+            }
+        );
+        eprintln!(
+            "  Scheduler: {}",
+            if config.scheduler.enabled {
+                format!("{} jobs", config.scheduler.jobs.len())
+            } else {
+                "disabled".into()
+            }
+        );
+        eprintln!("  Tools: {}", enabled_tools_summary(&config));
+        eprintln!(
+            "  MCP servers: {}",
+            if config.mcp.servers.is_empty() {
+                "(none)".into()
+            } else {
+                config
+                    .mcp
+                    .servers
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
         return;
     }
 
@@ -117,7 +150,10 @@ async fn main() {
         // We detect which one by checking in reverse (CLI tokens start with sk-ant-oat).
         if api_key.starts_with("sk-ant-oat") {
             auth_source = "cli".to_string();
-        } else if std::env::var("ANTHROPIC_API_KEY").map(|k| k == api_key).unwrap_or(false) {
+        } else if std::env::var("ANTHROPIC_API_KEY")
+            .map(|k| k == api_key)
+            .unwrap_or(false)
+        {
             auth_source = "env".to_string();
         } else {
             auth_source = "config".to_string();
@@ -129,11 +165,17 @@ async fn main() {
                 if let Some(ref url) = config.provider.api_url {
                     p = p.with_api_url(url);
                 }
-                eprintln!("[init] provider: openai ({}) [source: {}]", config.provider.model, auth_source);
+                eprintln!(
+                    "[init] provider: openai ({}) [source: {}]",
+                    config.provider.model, auth_source
+                );
                 Arc::new(p)
             }
             _ => {
-                eprintln!("[init] provider: claude ({}) [source: {}]", config.provider.model, auth_source);
+                eprintln!(
+                    "[init] provider: claude ({}) [source: {}]",
+                    config.provider.model, auth_source
+                );
                 Arc::new(ClaudeProvider::new(api_key, &config.provider.model))
             }
         };
@@ -146,7 +188,10 @@ async fn main() {
     // --- Session store ---
     let store: Arc<dyn orra::store::SessionStore> = match config.sessions.store.as_str() {
         "file" => {
-            eprintln!("[init] session store: file ({})", config.sessions.path.display());
+            eprintln!(
+                "[init] session store: file ({})",
+                config.sessions.path.display()
+            );
             Arc::new(FileStore::new(&config.sessions.path))
         }
         _ => {
@@ -172,19 +217,26 @@ async fn main() {
     let mut tool_registry = ToolRegistry::new();
     // Pass the DynamicProvider as an Arc<dyn Provider> to tools
     let provider_for_tools: Arc<dyn Provider> = dynamic_provider.clone() as Arc<dyn Provider>;
-    tools::register_all(&mut tool_registry, &config, &provider_for_tools, cron_service.as_ref());
+    tools::register_all(
+        &mut tool_registry,
+        &config,
+        &provider_for_tools,
+        cron_service.as_ref(),
+    );
 
     // --- MCP servers ---
     let mut _mcp_clients = Vec::new();
     for server in &config.mcp.servers {
         let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
-        let env: Vec<(&str, &str)> = server.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let env: Vec<(&str, &str)> = server
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
 
-        match orra::mcp::transport::StdioTransport::spawn_with_env(
-            &server.command,
-            &args,
-            &env,
-        ).await {
+        match orra::mcp::transport::StdioTransport::spawn_with_env(&server.command, &args, &env)
+            .await
+        {
             Ok(transport) => {
                 let transport = std::sync::Arc::new(transport);
                 match orra::mcp::register_mcp_tools(&mut tool_registry, transport).await {
@@ -193,12 +245,18 @@ async fn main() {
                         _mcp_clients.push(client);
                     }
                     Err(e) => {
-                        eprintln!("[init] mcp server '{}': handshake failed: {}", server.name, e);
+                        eprintln!(
+                            "[init] mcp server '{}': handshake failed: {}",
+                            server.name, e
+                        );
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[init] mcp server '{}': failed to start: {}", server.name, e);
+                eprintln!(
+                    "[init] mcp server '{}': failed to start: {}",
+                    server.name, e
+                );
             }
         }
     }
@@ -209,17 +267,23 @@ async fn main() {
     let policies = PolicyRegistry::default();
 
     // --- Approval channel (shared between ApprovalHook and WS handler) ---
-    let (approval_tx, approval_rx) = tokio::sync::mpsc::channel::<hooks::approval::ApprovalRequest>(32);
+    let (approval_tx, approval_rx) =
+        tokio::sync::mpsc::channel::<hooks::approval::ApprovalRequest>(32);
 
     // --- Discord config for approval routing ---
-    let discord_approval_config = config.discord.token.as_ref()
+    let discord_approval_config = config
+        .discord
+        .token
+        .as_ref()
         .filter(|t| !t.is_empty() && !t.starts_with("${"))
         .map(|t| orra::tools::discord::DiscordConfig::new(t));
 
     // --- Hooks ---
     let mut hook_registry = HookRegistry::new();
     hook_registry.register(Arc::new(hooks::logging::LoggingHook::new()));
-    hook_registry.register(Arc::new(hooks::working_directory::WorkingDirectoryHook::new()));
+    hook_registry.register(Arc::new(
+        hooks::working_directory::WorkingDirectoryHook::new(),
+    ));
     let approval_hook = hooks::approval::ApprovalHook::new(approval_tx.clone());
     let approval_hook = if let Some(ref dc) = discord_approval_config {
         approval_hook.with_discord(dc.clone())
@@ -276,12 +340,36 @@ async fn main() {
 
     // --- Multi-agent runtimes ---
     let agents = config.resolved_agents();
-    let default_agent_name = agents.first().map(|a| a.name.clone()).unwrap_or_else(|| "Atlas".into());
-    let mut runtimes_map: std::collections::HashMap<String, Arc<Runtime<CharEstimator>>> = std::collections::HashMap::new();
+    let default_agent_name = agents
+        .first()
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| "Atlas".into());
+    let mut runtimes_map: std::collections::HashMap<String, Arc<Runtime<CharEstimator>>> =
+        std::collections::HashMap::new();
 
     // Create the shared runtimes Arc upfront so the DelegateToAgentTool can
     // reference it even before the map is populated.
     let runtimes = Arc::new(tokio::sync::RwLock::new(runtimes_map.clone()));
+
+    // --- Federation service (created before agent build so tools can reference it) ---
+    let federation_service: Option<Arc<federation::FederationService>> =
+        if config.federation.enabled {
+            let local_agents: Vec<federation::LocalAgentInfo> = agents
+                .iter()
+                .map(|a| federation::LocalAgentInfo {
+                    name: a.name.clone(),
+                    personality: a.personality.clone(),
+                    model: config.provider.model.clone(),
+                })
+                .collect();
+
+            Some(Arc::new(federation::FederationService::new(
+                config.federation.clone(),
+                local_agents,
+            )))
+        } else {
+            None
+        };
 
     // Auto-enable delegation when multiple agents are configured
     let enable_delegation = config.tools.delegation || agents.len() > 1;
@@ -292,8 +380,33 @@ async fn main() {
         // Collect all agent names for the system prompt
         let all_agent_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
 
+        // If federation is enabled, include a hint about remote agents in the system prompt.
+        // Actual remote agent names are discovered at runtime, so we just describe the capability.
+        let federation_remote_agents: Vec<identity::RemoteAgentDesc> =
+            if federation_service.is_some() {
+                // At startup, static peers are seeded but not yet discovered.
+                // We pass an empty list — the tool description handles discovery.
+                // If we have static peer names, include a placeholder.
+                config
+                    .federation
+                    .peers
+                    .iter()
+                    .map(|p| identity::RemoteAgentDesc {
+                        name: format!("(agents on {})", p.name),
+                        instance: p.name.clone(),
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
         for agent_profile in &agents {
-            let agent_prompt = identity::build_agent_system_prompt(agent_profile, &config, &all_agent_names);
+            let agent_prompt = identity::build_agent_system_prompt_full(
+                agent_profile,
+                &config,
+                &all_agent_names,
+                &federation_remote_agents,
+            );
             let agent_runtime_config = RuntimeConfig {
                 system_prompt: Some(agent_prompt),
                 max_turns: 10,
@@ -308,10 +421,17 @@ async fn main() {
             };
 
             // Each agent shares the same provider, store, tools, and policies
-            let provider_for_agent: Arc<dyn Provider> = dynamic_provider.clone() as Arc<dyn Provider>;
+            let provider_for_agent: Arc<dyn Provider> =
+                dynamic_provider.clone() as Arc<dyn Provider>;
             let mut agent_tool_registry = ToolRegistry::new();
-            let provider_for_agent_tools: Arc<dyn Provider> = dynamic_provider.clone() as Arc<dyn Provider>;
-            tools::register_all(&mut agent_tool_registry, &config, &provider_for_agent_tools, cron_service.as_ref());
+            let provider_for_agent_tools: Arc<dyn Provider> =
+                dynamic_provider.clone() as Arc<dyn Provider>;
+            tools::register_all(
+                &mut agent_tool_registry,
+                &config,
+                &provider_for_agent_tools,
+                cron_service.as_ref(),
+            );
 
             // Register inter-agent delegation tool
             if enable_delegation {
@@ -323,10 +443,23 @@ async fn main() {
                 ));
             }
 
+            // Register remote delegation tool (federation)
+            if let Some(ref fed_service) = federation_service {
+                agent_tool_registry.register(Box::new(
+                    federation::tool::DelegateToRemoteAgentTool::new(
+                        fed_service.registry().clone(),
+                        fed_service.instance_name().to_string(),
+                        agent_profile.name.clone(),
+                    ),
+                ));
+            }
+
             let agent_policies = PolicyRegistry::default();
             let mut agent_hook_registry = HookRegistry::new();
             agent_hook_registry.register(Arc::new(hooks::logging::LoggingHook::new()));
-            agent_hook_registry.register(Arc::new(hooks::working_directory::WorkingDirectoryHook::new()));
+            agent_hook_registry.register(Arc::new(
+                hooks::working_directory::WorkingDirectoryHook::new(),
+            ));
             let agent_approval_hook = hooks::approval::ApprovalHook::new(approval_tx.clone());
             let agent_approval_hook = if let Some(ref dc) = discord_approval_config {
                 agent_approval_hook.with_discord(dc.clone())
@@ -360,6 +493,44 @@ async fn main() {
 
     let agent_profiles = Arc::new(tokio::sync::RwLock::new(agents.clone()));
     let default_agent = Arc::new(tokio::sync::RwLock::new(default_agent_name.clone()));
+
+    // --- Federation startup ---
+    let _federation_handles = if let Some(ref fed_service) = federation_service {
+        let federation_port = fed_service.port(config.gateway.port);
+        let handles = fed_service.start(config.gateway.port).await;
+
+        // Start the federation HTTP API server
+        let fed_state = federation::api::FederationState {
+            service: fed_service.clone(),
+            runtimes: runtimes.clone(),
+        };
+        let fed_router = federation::api::federation_router(fed_state);
+        let fed_addr = format!("0.0.0.0:{federation_port}");
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(&fed_addr).await {
+                Ok(listener) => {
+                    eprintln!("[federation] API listening on http://{fed_addr}");
+                    if let Err(e) = axum::serve(listener, fed_router).await {
+                        eprintln!("[federation] API server error: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[federation] Failed to bind {fed_addr}: {e}");
+                }
+            }
+        });
+
+        eprintln!(
+            "[init] federation: enabled (instance: '{}', {} static peers, port: {})",
+            fed_service.instance_name(),
+            config.federation.peers.len(),
+            federation_port,
+        );
+
+        Some(handles)
+    } else {
+        None
+    };
 
     // --- Scheduler ---
     let _scheduler_handle = if config.scheduler.enabled && !config.scheduler.jobs.is_empty() {
@@ -395,64 +566,63 @@ async fn main() {
         // Wire up the callback that runs when a cron job fires
         let rt = runtime.clone();
         let events_tx = session_events_tx.clone();
-        let cron_callback: orra::cron::service::CronCallback =
-            Arc::new(move |job| {
-                let rt = rt.clone();
-                let events_tx = events_tx.clone();
-                tokio::spawn(async move {
-                    let raw_prompt = match &job.payload {
-                        CronPayload::AgentTurn { prompt } => prompt.clone(),
-                        CronPayload::SystemEvent { message } => message.clone(),
-                    };
-                    // If the job targets an existing session (e.g. web:uuid),
-                    // use that namespace directly so messages appear in the
-                    // user's session. Otherwise prefix with cron: to create
-                    // a dedicated cron session.
-                    let is_web = job.namespace.starts_with("web:");
-                    let ns = if is_web {
-                        Namespace::parse(&job.namespace)
-                    } else {
-                        Namespace::parse(&format!("cron:{}", job.namespace))
-                    };
-                    // For web sessions, tell the LLM to just respond with text
-                    // instead of trying to use Discord's send_message tool.
-                    // Prefix with [cron] marker so the UI can style/hide it.
-                    let prompt = if is_web {
-                        format!(
-                            "[cron:{}] {}\n\n\
+        let cron_callback: orra::cron::service::CronCallback = Arc::new(move |job| {
+            let rt = rt.clone();
+            let events_tx = events_tx.clone();
+            tokio::spawn(async move {
+                let raw_prompt = match &job.payload {
+                    CronPayload::AgentTurn { prompt } => prompt.clone(),
+                    CronPayload::SystemEvent { message } => message.clone(),
+                };
+                // If the job targets an existing session (e.g. web:uuid),
+                // use that namespace directly so messages appear in the
+                // user's session. Otherwise prefix with cron: to create
+                // a dedicated cron session.
+                let is_web = job.namespace.starts_with("web:");
+                let ns = if is_web {
+                    Namespace::parse(&job.namespace)
+                } else {
+                    Namespace::parse(&format!("cron:{}", job.namespace))
+                };
+                // For web sessions, tell the LLM to just respond with text
+                // instead of trying to use Discord's send_message tool.
+                // Prefix with [cron] marker so the UI can style/hide it.
+                let prompt = if is_web {
+                    format!(
+                        "[cron:{}] {}\n\n\
                              (This is a scheduled task running in a web chat session. \
                              Respond with text directly — do not use send_message \
                              or any Discord tools.)",
-                            job.name, raw_prompt
-                        )
-                    } else {
-                        raw_prompt
-                    };
-                    eprintln!(
-                        "[cron] Running job '{}' in namespace {}",
-                        job.name,
-                        ns.key()
-                    );
-                    let ns_key = ns.key();
-                    let model = job.model.clone();
-                    match rt.run_with_model(&ns, Message::user(&prompt), model).await {
-                        Ok(result) => {
-                            eprintln!(
-                                "[cron] Job '{}' completed ({} turns)",
-                                job.name,
-                                result.turns.len()
-                            );
-                            // Notify WebSocket clients that this session was updated
-                            if ns_key.starts_with("web:") {
-                                let _ = events_tx.send(ns_key);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[cron] Job '{}' failed: {}", job.name, e);
+                        job.name, raw_prompt
+                    )
+                } else {
+                    raw_prompt
+                };
+                eprintln!(
+                    "[cron] Running job '{}' in namespace {}",
+                    job.name,
+                    ns.key()
+                );
+                let ns_key = ns.key();
+                let model = job.model.clone();
+                match rt.run_with_model(&ns, Message::user(&prompt), model).await {
+                    Ok(result) => {
+                        eprintln!(
+                            "[cron] Job '{}' completed ({} turns)",
+                            job.name,
+                            result.turns.len()
+                        );
+                        // Notify WebSocket clients that this session was updated
+                        if ns_key.starts_with("web:") {
+                            let _ = events_tx.send(ns_key);
                         }
                     }
-                })
-            });
+                    Err(e) => {
+                        eprintln!("[cron] Job '{}' failed: {}", job.name, e);
+                    }
+                }
+            })
+        });
         svc.set_callback(cron_callback).await;
 
         Some(svc.start())
@@ -497,10 +667,16 @@ async fn main() {
         }
         // Discord-only mode: wait for Ctrl+C
         eprintln!();
-        eprintln!("=== {} — herald v{} ===", default_agent_name, env!("CARGO_PKG_VERSION"));
+        eprintln!(
+            "=== {} — herald v{} ===",
+            default_agent_name,
+            env!("CARGO_PKG_VERSION")
+        );
         eprintln!("Press Ctrl+C to stop.");
         eprintln!();
-        tokio::signal::ctrl_c().await.expect("failed to listen for ctrl+c");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for ctrl+c");
         eprintln!("\n[shutdown] Goodbye!");
         discord_manager.disconnect().await;
         return;
@@ -516,7 +692,10 @@ async fn main() {
     let gateway = Arc::new(GatewayChannel::new(gw_config_obj));
 
     let discord_api = Arc::new(tokio::sync::RwLock::new(
-        config.discord.token.as_ref()
+        config
+            .discord
+            .token
+            .as_ref()
             .filter(|t| !t.is_empty() && !t.starts_with("${"))
             .map(|t| orra::tools::discord::DiscordConfig::new(t)),
     ));
@@ -539,12 +718,20 @@ async fn main() {
         default_agent: default_agent.clone(),
         agent_profiles: agent_profiles.clone(),
         approval_rx: Arc::new(tokio::sync::Mutex::new(approval_rx)),
+        federation_service: federation_service.clone(),
     };
 
     // --- Start ---
     eprintln!();
-    eprintln!("=== {} — herald v{} ===", default_agent_name, env!("CARGO_PKG_VERSION"));
-    eprintln!("[init] web UI: http://{}:{}", config.gateway.host, config.gateway.port);
+    eprintln!(
+        "=== {} — herald v{} ===",
+        default_agent_name,
+        env!("CARGO_PKG_VERSION")
+    );
+    eprintln!(
+        "[init] web UI: http://{}:{}",
+        config.gateway.host, config.gateway.port
+    );
 
     if !dynamic_provider.is_configured() {
         eprintln!("[init] Provider not configured — visit the web UI to set your API key.");
@@ -553,7 +740,10 @@ async fn main() {
         eprintln!("[init] \u{26a0} Gateway has no API key — all endpoints are unauthenticated.");
         eprintln!("       Set [gateway] api_key in your config for production use.");
     }
-    eprintln!("Web UI available at http://{}:{}", config.gateway.host, config.gateway.port);
+    eprintln!(
+        "Web UI available at http://{}:{}",
+        config.gateway.host, config.gateway.port
+    );
     eprintln!("Press Ctrl+C to stop.");
     eprintln!();
 

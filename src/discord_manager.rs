@@ -137,7 +137,10 @@ impl DiscordManager {
         let handle = tokio::spawn(async move {
             if has_agents {
                 let mut router = Router::new(RoutingRule::MetadataKey("agent".into()));
-                router.add_channel("discord", channel_for_task as Arc<dyn orra::channels::Channel>);
+                router.add_channel(
+                    "discord",
+                    channel_for_task as Arc<dyn orra::channels::Channel>,
+                );
                 let default_key = default_agent_name.to_lowercase();
                 if let Err(e) = router.run(&runtimes_snapshot, Some(&default_key)).await {
                     eprintln!("[discord] Router error: {}", e);
@@ -167,11 +170,7 @@ impl DiscordManager {
 
         // Wait for the task to finish (with timeout)
         if let Some(handle) = self.task_handle.write().await.take() {
-            let _ = tokio::time::timeout(
-                tokio::time::Duration::from_secs(5),
-                handle,
-            )
-            .await;
+            let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle).await;
         }
 
         {

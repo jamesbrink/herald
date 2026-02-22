@@ -4,7 +4,7 @@ pub mod ws;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+use axum::http::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -23,6 +23,7 @@ use orra::tools::discord::DiscordConfig as DiscordApiConfig;
 
 use crate::config::{AgentProfileConfig, GatewayConfig};
 use crate::discord_manager::DiscordManager;
+use crate::federation::FederationService;
 use crate::provider_wrapper::DynamicProvider;
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,11 @@ pub struct AppState {
     pub agent_profiles: Arc<RwLock<Vec<AgentProfileConfig>>>,
     /// Receiver for tool approval requests from the ApprovalHook.
     /// The WebSocket handler takes this to relay approval requests to the client.
-    pub approval_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::hooks::approval::ApprovalRequest>>>,
+    pub approval_rx: Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::hooks::approval::ApprovalRequest>>,
+    >,
+    /// Federation service (None if federation is disabled).
+    pub federation_service: Option<Arc<FederationService>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +86,13 @@ pub struct AppState {
 
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([AUTHORIZATION, CONTENT_TYPE])
         .allow_origin(Any);
 
@@ -91,7 +102,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/sessions/{id}", get(handlers::get_session))
         .route("/sessions/{id}", delete(handlers::delete_session))
         .route("/sessions/{id}/name", put(handlers::rename_session))
-        .route("/sessions/{id}/directory", put(handlers::set_session_directory))
+        .route(
+            "/sessions/{id}/directory",
+            put(handlers::set_session_directory),
+        )
         .route("/sessions/{id}/chaos-mode", put(handlers::set_chaos_mode))
         .route("/fs/directories", get(handlers::list_directories))
         .route("/config", post(handlers::configure_provider))
@@ -160,12 +174,8 @@ async fn serve_static(uri: axum::http::Uri) -> Response {
         None => {
             // For SPA routes, serve index.html
             match StaticAssets::get("index.html") {
-                Some(content) => Html(
-                    std::str::from_utf8(&content.data)
-                        .unwrap_or("")
-                        .to_string(),
-                )
-                .into_response(),
+                Some(content) => Html(std::str::from_utf8(&content.data).unwrap_or("").to_string())
+                    .into_response(),
                 None => (StatusCode::NOT_FOUND, "Not found").into_response(),
             }
         }
