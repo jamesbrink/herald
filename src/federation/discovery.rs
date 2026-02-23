@@ -3,6 +3,7 @@
 //! Registers this herald instance as `_herald._tcp.local.` and browses for
 //! other instances on the local network.
 
+use crate::hlog;
 use super::client::PeerClient;
 use super::{PeerHealth, PeerRegistry, PeerSource, PeerState};
 use tokio_util::sync::CancellationToken;
@@ -33,7 +34,7 @@ pub async fn register_service(
 
     mdns.register(service_info)?;
 
-    eprintln!(
+    hlog!(
         "[federation] mDNS: registered as '{instance_name}' on port {port}"
     );
 
@@ -43,7 +44,7 @@ pub async fn register_service(
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
-                eprintln!("[federation] mDNS: unregistering service");
+                hlog!("[federation] mDNS: unregistering service");
                 let _ = mdns.shutdown();
                 break;
             }
@@ -66,7 +67,7 @@ pub async fn browse_peers(
     let mdns = mdns_sd::ServiceDaemon::new()?;
     let receiver = mdns.browse(SERVICE_TYPE)?;
 
-    eprintln!("[federation] mDNS: browsing for peers...");
+    hlog!("[federation] mDNS: browsing for peers...");
 
     let own_instance = own_instance.to_string();
     let global_secret = global_secret.to_string();
@@ -74,7 +75,7 @@ pub async fn browse_peers(
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
-                eprintln!("[federation] mDNS: browse task shutting down");
+                hlog!("[federation] mDNS: browse task shutting down");
                 let _ = mdns.shutdown();
                 break;
             }
@@ -102,7 +103,7 @@ pub async fn browse_peers(
 
                             if let Some(addr) = addresses.iter().next() {
                                 let url = format!("http://{addr}:{port}");
-                                eprintln!(
+                                hlog!(
                                     "[federation] mDNS: discovered peer '{short_name}' at {url}"
                                 );
 
@@ -121,7 +122,7 @@ pub async fn browse_peers(
                                             .await;
                                     }
                                     Err(e) => {
-                                        eprintln!(
+                                        hlog!(
                                             "[federation] mDNS: failed to discover agents from '{peer_name}': {e}"
                                         );
                                         // Still register the peer so health checks can find it later
@@ -150,7 +151,7 @@ pub async fn browse_peers(
                             let peers = registry.list_peers().await;
                             if let Some(peer) = peers.iter().find(|p| p.name == short_name) {
                                 if peer.source == PeerSource::Mdns {
-                                    eprintln!(
+                                    hlog!(
                                         "[federation] mDNS: peer '{short_name}' removed"
                                     );
                                     registry.remove_peer(&short_name).await;
@@ -162,7 +163,7 @@ pub async fn browse_peers(
                         }
                     },
                     Err(e) => {
-                        eprintln!("[federation] mDNS browse error: {e}");
+                        hlog!("[federation] mDNS browse error: {e}");
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                 }

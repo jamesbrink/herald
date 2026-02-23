@@ -16,6 +16,7 @@ pub mod discovery;
 pub mod manager;
 pub mod tool;
 
+use crate::hlog;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -347,7 +348,7 @@ impl FederationService {
                                     .await;
                             }
                             Err(e) => {
-                                eprintln!(
+                                hlog!(
                                     "[federation] failed to discover agents from '{}': {e}",
                                     peer_config.name
                                 );
@@ -357,7 +358,7 @@ impl FederationService {
                     }
                     tokio::select! {
                         _ = token.cancelled() => {
-                            eprintln!("[federation] peer discovery task shutting down");
+                            hlog!("[federation] peer discovery task shutting down");
                             break;
                         }
                         _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
@@ -374,7 +375,7 @@ impl FederationService {
                 // Initial delay to let discovery run first
                 tokio::select! {
                     _ = token.cancelled() => {
-                        eprintln!("[federation] health check task shutting down (during initial delay)");
+                        hlog!("[federation] health check task shutting down (during initial delay)");
                         return;
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
@@ -394,7 +395,7 @@ impl FederationService {
                     }
                     tokio::select! {
                         _ = token.cancelled() => {
-                            eprintln!("[federation] health check task shutting down");
+                            hlog!("[federation] health check task shutting down");
                             break;
                         }
                         _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
@@ -415,7 +416,7 @@ impl FederationService {
                     discovery::register_service(&instance_name, federation_port, register_token)
                         .await
                 {
-                    eprintln!("[federation] mDNS registration failed: {e}");
+                    hlog!("[federation] mDNS registration failed: {e}");
                 }
             });
             handles.push(register_handle);
@@ -434,7 +435,7 @@ impl FederationService {
                 )
                 .await
                 {
-                    eprintln!("[federation] mDNS browsing failed: {e}");
+                    hlog!("[federation] mDNS browsing failed: {e}");
                 }
             });
             handles.push(browse_handle);

@@ -12,6 +12,7 @@
 //! | `/api/federation/sessions/detail`    | GET    | Get a session's messages      |
 //! | `/api/federation/sessions/chat`      | POST   | Chat in a session             |
 
+use crate::hlog;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -120,7 +121,7 @@ pub async fn relay_message(
         .run(&ns, Message::user(&request.message))
         .await
         .map_err(|e| {
-            eprintln!(
+            hlog!(
                 "[federation] relay to '{}' failed: {e}",
                 request.agent
             );
@@ -272,7 +273,7 @@ pub async fn session_chat(
         .run(&ns, Message::user(&request.message))
         .await
         .map_err(|e| {
-            eprintln!("[federation] session chat failed: {e}");
+            hlog!("[federation] session chat failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 

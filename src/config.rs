@@ -1,3 +1,4 @@
+use crate::hlog;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -652,14 +653,14 @@ impl Config {
         if !config.has_provider_key() {
             if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
                 if !key.is_empty() {
-                    eprintln!("[config] Auto-detected ANTHROPIC_API_KEY from environment");
+                    hlog!("[config] Auto-detected ANTHROPIC_API_KEY from environment");
                     config.provider.api_key = Some(key);
                 }
             }
         }
         if !config.has_provider_key() {
             if let Some(key) = read_claude_cli_credentials() {
-                eprintln!("[config] Auto-detected API key from Claude CLI credentials");
+                hlog!("[config] Auto-detected API key from Claude CLI credentials");
                 config.provider.api_key = Some(key);
             }
         }
@@ -668,7 +669,7 @@ impl Config {
         // the browser regardless of whether Discord is also configured.
         if !config.gateway.enabled {
             config.gateway.enabled = true;
-            eprintln!(
+            hlog!(
                 "[config] Auto-enabling web UI on {}:{}",
                 config.gateway.host, config.gateway.port
             );
@@ -953,11 +954,11 @@ fn extract_oauth_token(
         if now_ms + buffer_ms > expires_at {
             // Token is expired or expiring soon — try to refresh
             if let Some(refresh_token) = oauth.get("refreshToken").and_then(|v| v.as_str()) {
-                eprintln!("[config] OAuth token expired, attempting refresh...");
+                hlog!("[config] OAuth token expired, attempting refresh...");
                 if let Some(new_token) = refresh_oauth_token(store, refresh_token, parsed) {
                     return Some(new_token);
                 }
-                eprintln!("[config] OAuth token refresh failed");
+                hlog!("[config] OAuth token refresh failed");
                 return None;
             }
             return None;
@@ -1026,12 +1027,12 @@ fn refresh_oauth_token(
     let persisted = persist_credentials(store, &updated);
 
     if persisted {
-        eprintln!(
+        hlog!(
             "[config] OAuth token refreshed successfully (expires in {}h)",
             expires_in / 3600
         );
     } else {
-        eprintln!("[config] OAuth token refreshed but credential store update failed");
+        hlog!("[config] OAuth token refreshed but credential store update failed");
     }
 
     // Return the new token regardless of whether persistence succeeded —

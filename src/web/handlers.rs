@@ -1,3 +1,4 @@
+use crate::hlog;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -137,7 +138,7 @@ pub async fn configure_provider(
     // Hot-swap the provider
     state.dynamic_provider.swap(new_provider).await;
 
-    eprintln!(
+    hlog!(
         "[config] Provider configured via web UI: {} ({})",
         provider_type, model
     );
@@ -661,7 +662,7 @@ pub async fn update_provider(
         let mut auth = state.auth_source.write().await;
         *auth = "web_ui".to_string();
 
-        eprintln!(
+        hlog!(
             "[settings] Provider updated via settings: {} ({})",
             provider_type, model
         );
@@ -751,7 +752,7 @@ pub async fn update_discord(
             )
                 .into_response();
         }
-        eprintln!("[settings] Discord token saved to config file");
+        hlog!("[settings] Discord token saved to config file");
     }
 
     // Save filter/allowed_users to config file
@@ -796,7 +797,7 @@ pub async fn update_discord(
             .await
         {
             Ok(()) => {
-                eprintln!("[settings] Discord reconnected with new settings");
+                hlog!("[settings] Discord reconnected with new settings");
                 (
                     StatusCode::OK,
                     Json(serde_json::json!({
@@ -841,7 +842,7 @@ pub async fn disconnect_discord(
     }
 
     state.discord_manager.disconnect().await;
-    eprintln!("[settings] Discord disconnected via UI");
+    hlog!("[settings] Discord disconnected via UI");
 
     (
         StatusCode::OK,
@@ -907,7 +908,7 @@ pub async fn reconnect_discord(
                 let mut api = state.discord_api.write().await;
                 *api = Some(orra::tools::discord::DiscordConfig::new(&token));
             }
-            eprintln!("[settings] Discord reconnected via UI");
+            hlog!("[settings] Discord reconnected via UI");
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -961,7 +962,7 @@ pub async fn remove_discord(
         *api = None;
     }
 
-    eprintln!("[settings] Discord bot removed via UI");
+    hlog!("[settings] Discord bot removed via UI");
 
     (
         StatusCode::OK,
@@ -1090,7 +1091,7 @@ pub async fn update_federation(
         }
     }
 
-    eprintln!("[settings] Federation settings saved to config file");
+    hlog!("[settings] Federation settings saved to config file");
 
     // Hot-reload: apply the new settings at runtime
     if request.enabled {
@@ -1137,11 +1138,11 @@ pub async fn update_federation(
                 .into_response();
         }
 
-        eprintln!("[settings] Federation restarted with new settings");
+        hlog!("[settings] Federation restarted with new settings");
     } else {
         // Federation disabled — stop it
         state.federation_manager.stop().await;
-        eprintln!("[settings] Federation stopped");
+        hlog!("[settings] Federation stopped");
     }
 
     (
@@ -1176,7 +1177,7 @@ pub async fn detect_provider(
             let mut auth = state.auth_source.write().await;
             *auth = "env".to_string();
 
-            eprintln!("[settings] Provider auto-detected from ANTHROPIC_API_KEY");
+            hlog!("[settings] Provider auto-detected from ANTHROPIC_API_KEY");
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1196,7 +1197,7 @@ pub async fn detect_provider(
         let mut auth = state.auth_source.write().await;
         *auth = "cli".to_string();
 
-        eprintln!("[settings] Provider auto-detected from Claude CLI credentials");
+        hlog!("[settings] Provider auto-detected from Claude CLI credentials");
         return (
             StatusCode::OK,
             Json(serde_json::json!({

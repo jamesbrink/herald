@@ -3,6 +3,7 @@
 //! Wraps [`FederationService`] with start/stop/restart semantics, similar to
 //! [`DiscordManager`](crate::discord_manager::DiscordManager).
 
+use crate::hlog;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -93,22 +94,22 @@ impl FederationManager {
         let api_handle = tokio::spawn(async move {
             match tokio::net::TcpListener::bind(&fed_addr).await {
                 Ok(listener) => {
-                    eprintln!("[federation] API listening on http://{fed_addr}");
+                    hlog!("[federation] API listening on http://{fed_addr}");
                     if let Err(e) = axum::serve(listener, fed_router)
                         .with_graceful_shutdown(api_token.cancelled_owned())
                         .await
                     {
-                        eprintln!("[federation] API server error: {e}");
+                        hlog!("[federation] API server error: {e}");
                     }
-                    eprintln!("[federation] API server stopped");
+                    hlog!("[federation] API server stopped");
                 }
                 Err(e) => {
-                    eprintln!("[federation] Failed to bind {fed_addr}: {e}");
+                    hlog!("[federation] Failed to bind {fed_addr}: {e}");
                 }
             }
         });
 
-        eprintln!(
+        hlog!(
             "[federation] Started (instance: '{}', port: {})",
             service.instance_name(),
             federation_port,
@@ -131,7 +132,7 @@ impl FederationManager {
         // Cancel all background tasks
         if let Some(token) = self.cancel_token.write().await.take() {
             token.cancel();
-            eprintln!("[federation] Cancellation signal sent");
+            hlog!("[federation] Cancellation signal sent");
         }
 
         // Wait for background tasks to finish (with timeout)
@@ -140,8 +141,8 @@ impl FederationManager {
             let count = handles.len();
             let wait_all = futures_join_all(handles);
             match tokio::time::timeout(std::time::Duration::from_secs(5), wait_all).await {
-                Ok(_) => eprintln!("[federation] {count} background tasks stopped"),
-                Err(_) => eprintln!("[federation] Timeout waiting for {count} background tasks"),
+                Ok(_) => hlog!("[federation] {count} background tasks stopped"),
+                Err(_) => hlog!("[federation] Timeout waiting for {count} background tasks"),
             }
         }
 
@@ -150,8 +151,8 @@ impl FederationManager {
             // The API server should already be shutting down due to cancellation.
             // Give it a short grace period.
             match tokio::time::timeout(std::time::Duration::from_secs(3), handle).await {
-                Ok(_) => eprintln!("[federation] API server stopped"),
-                Err(_) => eprintln!("[federation] Timeout waiting for API server"),
+                Ok(_) => hlog!("[federation] API server stopped"),
+                Err(_) => hlog!("[federation] Timeout waiting for API server"),
             }
         }
 

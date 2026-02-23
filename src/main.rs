@@ -3,12 +3,14 @@ mod discord_manager;
 mod federation;
 mod hooks;
 mod identity;
+mod logging;
 mod provider_wrapper;
 mod tools;
 mod update;
 mod web;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -69,6 +71,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // --- File logging ---
+    logging::init(&config.data_dir);
 
     if cli.check {
         eprintln!("Configuration is valid.");
@@ -166,14 +171,14 @@ async fn main() {
                 if let Some(ref url) = config.provider.api_url {
                     p = p.with_api_url(url);
                 }
-                eprintln!(
+                hlog!(
                     "[init] provider: openai ({}) [source: {}]",
                     config.provider.model, auth_source
                 );
                 Arc::new(p)
             }
             _ => {
-                eprintln!(
+                hlog!(
                     "[init] provider: claude ({}) [source: {}]",
                     config.provider.model, auth_source
                 );
@@ -182,26 +187,26 @@ async fn main() {
         };
         Arc::new(DynamicProvider::with_provider(real_provider))
     } else {
-        eprintln!("[init] provider: not configured (use web UI to set API key)");
+        hlog!("[init] provider: not configured (use web UI to set API key)");
         Arc::new(DynamicProvider::placeholder())
     };
 
     // --- Data directory ---
     let sessions_path = config.sessions_path();
     let cron_path = config.cron_path();
-    eprintln!("[init] data directory: {}", config.data_dir.display());
+    hlog!("[init] data directory: {}", config.data_dir.display());
 
     // --- Session store ---
     let store: Arc<dyn orra::store::SessionStore> = match config.sessions.store.as_str() {
         "file" => {
-            eprintln!(
+            hlog!(
                 "[init] session store: file ({})",
                 sessions_path.display()
             );
             Arc::new(FileStore::new(&sessions_path))
         }
         _ => {
-            eprintln!("[init] session store: in-memory");
+            hlog!("[init] session store: in-memory");
             Arc::new(InMemoryStore::new())
         }
     };
@@ -210,10 +215,10 @@ async fn main() {
     let cron_service = if config.cron.enabled {
         let cron_store = Arc::new(FileCronStore::new(&cron_path));
         if let Err(e) = cron_store.load_from_disk().await {
-            eprintln!("[init] cron: failed to load jobs: {}", e);
+            hlog!("[init] cron: failed to load jobs: {}", e);
         }
         let svc = Arc::new(CronService::new(cron_store));
-        eprintln!("[init] cron: enabled ({})", cron_path.display());
+        hlog!("[init] cron: enabled ({})", cron_path.display());
         Some(svc)
     } else {
         None
@@ -247,11 +252,11 @@ async fn main() {
                 let transport = std::sync::Arc::new(transport);
                 match orra::mcp::register_mcp_tools(&mut tool_registry, transport).await {
                     Ok(client) => {
-                        eprintln!("[init] mcp server '{}': connected", server.name);
+                        hlog!("[init] mcp server '{}': connected", server.name);
                         _mcp_clients.push(client);
                     }
                     Err(e) => {
-                        eprintln!(
+                        hlog!(
                             "[init] mcp server '{}': handshake failed: {}",
                             server.name, e
                         );
@@ -259,7 +264,7 @@ async fn main() {
                 }
             }
             Err(e) => {
-                eprintln!(
+                hlog!(
                     "[init] mcp server '{}': failed to start: {}",
                     server.name, e
                 );
@@ -267,7 +272,7 @@ async fn main() {
         }
     }
 
-    eprintln!("[init] registered {} tools", tool_registry.len());
+    hlog!("[init] registered {} tools", tool_registry.len());
 
     // --- Policies ---
     let policies = PolicyRegistry::default();
@@ -286,7 +291,7 @@ async fn main() {
 
     // --- Hooks ---
     let mut hook_registry = HookRegistry::new();
-    hook_registry.register(Arc::new(hooks::logging::LoggingHook::new()));
+    hook_registry.register(Arc::new(hooks::file_logging::FileLoggingHook::new()));
     hook_registry.register(Arc::new(
         hooks::working_directory::WorkingDirectoryHook::new(),
     ));
@@ -304,7 +309,7 @@ async fn main() {
         if config.metrics.log_metrics {
             collector.add_sink(Arc::new(orra::metrics::LoggingSink));
         }
-        eprintln!("[init] metrics: enabled");
+        hlog!("[init] metrics: enabled");
         Some(Arc::new(collector))
     } else {
         None
@@ -368,7 +373,7 @@ async fn main() {
     let enable_federation_tool = config.federation.enabled;
 
     if agents.len() > 1 {
-        eprintln!("[init] multi-agent mode: {} agents", agents.len());
+        hlog!("[init] multi-agent mode: {} agents", agents.len());
 
         // Collect all agent names for the system prompt
         let all_agent_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
@@ -448,7 +453,7 @@ async fn main() {
 
             let agent_policies = PolicyRegistry::default();
             let mut agent_hook_registry = HookRegistry::new();
-            agent_hook_registry.register(Arc::new(hooks::logging::LoggingHook::new()));
+            agent_hook_registry.register(Arc::new(hooks::file_logging::FileLoggingHook::new()));
             agent_hook_registry.register(Arc::new(
                 hooks::working_directory::WorkingDirectoryHook::new(),
             ));
@@ -471,7 +476,7 @@ async fn main() {
             agent_rt.set_hooks(agent_hook_registry);
 
             let key = agent_profile.name.to_lowercase();
-            eprintln!("[init]   agent '{}' registered", agent_profile.name);
+            hlog!("[init]   agent '{}' registered", agent_profile.name);
             runtimes_map.insert(key, Arc::new(agent_rt));
         }
         // Populate the shared runtimes map now that all agents are built
@@ -501,9 +506,9 @@ async fn main() {
             .start(config.federation.clone(), local_agents, config.gateway.port)
             .await
         {
-            eprintln!("[init] federation: failed to start: {e}");
+            hlog!("[init] federation: failed to start: {e}");
         } else {
-            eprintln!(
+            hlog!(
                 "[init] federation: enabled (instance: '{}', {} static peers)",
                 config.federation.instance_name,
                 config.federation.peers.len(),
@@ -519,12 +524,12 @@ async fn main() {
             let cb: orra::scheduler::JobCallback = Arc::new(move || {
                 let m = msg.clone();
                 tokio::spawn(async move {
-                    eprintln!("[scheduler] triggered: {}", m);
+                    hlog!("[scheduler] triggered: {}", m);
                 })
             });
             match scheduler.add_job(&job.name, &job.schedule, cb).await {
-                Ok(_) => eprintln!("[init] scheduled job: {} ({})", job.name, job.schedule),
-                Err(e) => eprintln!("[init] failed to schedule {}: {}", job.name, e),
+                Ok(_) => hlog!("[init] scheduled job: {} ({})", job.name, job.schedule),
+                Err(e) => hlog!("[init] failed to schedule {}: {}", job.name, e),
             }
         }
         Some(scheduler.start())
@@ -535,19 +540,24 @@ async fn main() {
     // --- Session event broadcast (for pushing cron results to WebSocket clients) ---
     let (session_events_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
+    // --- Interactive-request counter (shared with cron callback) ---
+    let interactive_count = Arc::new(AtomicUsize::new(0));
+
     // --- Cron service tick loop ---
     let _cron_handle = if let Some(ref svc) = cron_service {
         let jobs = svc.list_jobs().await.unwrap_or_default();
         if !jobs.is_empty() {
-            eprintln!("[init] cron: loaded {} jobs", jobs.len());
+            hlog!("[init] cron: loaded {} jobs", jobs.len());
         }
 
         // Wire up the callback that runs when a cron job fires
         let rt = runtime.clone();
         let events_tx = session_events_tx.clone();
+        let cron_interactive = interactive_count.clone();
         let cron_callback: orra::cron::service::CronCallback = Arc::new(move |job| {
             let rt = rt.clone();
             let events_tx = events_tx.clone();
+            let interactive = cron_interactive.clone();
             tokio::spawn(async move {
                 let raw_prompt = match &job.payload {
                     CronPayload::AgentTurn { prompt } => prompt.clone(),
@@ -577,16 +587,35 @@ async fn main() {
                 } else {
                     raw_prompt
                 };
-                eprintln!(
+
+                // Defer if an interactive chat is in-flight to avoid
+                // saturating the shared API key.
+                let mut deferred = false;
+                for _ in 0..30 {
+                    if interactive.load(Ordering::Relaxed) == 0 {
+                        break;
+                    }
+                    if !deferred {
+                        hlog!(
+                            "[cron] Deferring job '{}' — interactive chat active",
+                            job.name
+                        );
+                        deferred = true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+
+                hlog!(
                     "[cron] Running job '{}' in namespace {}",
                     job.name,
                     ns.key()
                 );
                 let ns_key = ns.key();
                 let model = job.model.clone();
-                match rt.run_with_model(&ns, Message::user(&prompt), model).await {
+                let max_turns = job.max_turns;
+                match rt.run_with_model(&ns, Message::user(&prompt), model, max_turns).await {
                     Ok(result) => {
-                        eprintln!(
+                        hlog!(
                             "[cron] Job '{}' completed ({} turns)",
                             job.name,
                             result.turns.len()
@@ -597,7 +626,7 @@ async fn main() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("[cron] Job '{}' failed: {}", job.name, e);
+                        hlog!("[cron] Job '{}' failed: {}", job.name, e);
                     }
                 }
             })
@@ -619,7 +648,7 @@ async fn main() {
     // Connect to Discord if a token is configured
     if config.has_discord_token() {
         let discord_token = config.discord.token.as_deref().unwrap();
-        eprintln!("Connecting to Discord...");
+        hlog!("Connecting to Discord...");
         match discord_manager
             .connect(
                 discord_token,
@@ -629,9 +658,9 @@ async fn main() {
             )
             .await
         {
-            Ok(()) => eprintln!("Connected! Listening for messages..."),
+            Ok(()) => hlog!("Connected! Listening for messages..."),
             Err(e) => {
-                eprintln!("Failed to connect to Discord: {}", e);
+                hlog!("Failed to connect to Discord: {}", e);
                 std::process::exit(1);
             }
         }
@@ -640,23 +669,23 @@ async fn main() {
     // --- Web UI (gateway) ---
     if !config.gateway.enabled {
         if !config.has_discord_token() {
-            eprintln!("No Discord token and gateway is disabled. Nothing to run.");
-            eprintln!("Enable the gateway or provide a Discord token in your config.");
+            hlog!("No Discord token and gateway is disabled. Nothing to run.");
+            hlog!("Enable the gateway or provide a Discord token in your config.");
             std::process::exit(1);
         }
         // Discord-only mode: wait for Ctrl+C
-        eprintln!();
-        eprintln!(
+        hlog!();
+        hlog!(
             "=== {} — herald v{} ===",
             default_agent_name,
             env!("CARGO_PKG_VERSION")
         );
-        eprintln!("Press Ctrl+C to stop.");
-        eprintln!();
+        hlog!("Press Ctrl+C to stop.");
+        hlog!();
         tokio::signal::ctrl_c()
             .await
             .expect("failed to listen for ctrl+c");
-        eprintln!("\n[shutdown] Goodbye!");
+        hlog!("\n[shutdown] Goodbye!");
         discord_manager.disconnect().await;
         return;
     }
@@ -706,33 +735,34 @@ async fn main() {
         gateway_port: config.gateway.port,
         update_checker,
         data_dir: config.data_dir.clone(),
+        interactive_count: interactive_count.clone(),
     };
 
     // --- Start ---
-    eprintln!();
-    eprintln!(
+    hlog!();
+    hlog!(
         "=== {} — herald v{} ===",
         default_agent_name,
         env!("CARGO_PKG_VERSION")
     );
-    eprintln!(
+    hlog!(
         "[init] web UI: http://{}:{}",
         config.gateway.host, config.gateway.port
     );
 
     if !dynamic_provider.is_configured() {
-        eprintln!("[init] Provider not configured — visit the web UI to set your API key.");
+        hlog!("[init] Provider not configured — visit the web UI to set your API key.");
     }
     if config.gateway.api_key.is_none() {
-        eprintln!("[init] \u{26a0} Gateway has no API key — all endpoints are unauthenticated.");
-        eprintln!("       Set [gateway] api_key in your config for production use.");
+        hlog!("[init] \u{26a0} Gateway has no API key — all endpoints are unauthenticated.");
+        hlog!("       Set [gateway] api_key in your config for production use.");
     }
-    eprintln!(
+    hlog!(
         "Web UI available at http://{}:{}",
         config.gateway.host, config.gateway.port
     );
-    eprintln!("Press Ctrl+C to stop.");
-    eprintln!();
+    hlog!("Press Ctrl+C to stop.");
+    hlog!();
 
     // Set up graceful shutdown
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -741,20 +771,20 @@ async fn main() {
         tokio::signal::ctrl_c()
             .await
             .expect("failed to listen for ctrl+c");
-        eprintln!("\n[shutdown] Received Ctrl+C, shutting down...");
+        hlog!("\n[shutdown] Received Ctrl+C, shutting down...");
         let _ = shutdown_tx.send(());
     });
 
     tokio::select! {
         result = web::serve(app_state, &config.gateway) => {
             if let Err(e) = result {
-                eprintln!("[error] Web server error: {}", e);
+                hlog!("[error] Web server error: {}", e);
                 std::process::exit(1);
             }
         }
         _ = &mut shutdown_rx => {
             discord_manager.disconnect().await;
-            eprintln!("[shutdown] Goodbye!");
+            hlog!("[shutdown] Goodbye!");
         }
     }
 }

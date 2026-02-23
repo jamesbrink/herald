@@ -2,6 +2,7 @@
 //! stopped and restarted at runtime (e.g., when the token is changed via
 //! the web UI).
 
+use crate::hlog;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -143,20 +144,20 @@ impl DiscordManager {
                 );
                 let default_key = default_agent_name.to_lowercase();
                 if let Err(e) = router.run(&runtimes_snapshot, Some(&default_key)).await {
-                    eprintln!("[discord] Router error: {}", e);
+                    hlog!("[discord] Router error: {}", e);
                 }
             } else {
                 if let Err(e) = ChannelAdapter::run(channel_for_task.as_ref(), &runtime).await {
-                    eprintln!("[discord] Channel adapter error: {}", e);
+                    hlog!("[discord] Channel adapter error: {}", e);
                 }
             }
-            eprintln!("[discord] Channel adapter stopped");
+            hlog!("[discord] Channel adapter stopped");
         });
 
         *self.active_channel.write().await = Some(channel);
         *self.task_handle.write().await = Some(handle);
 
-        eprintln!("[discord] Connected successfully");
+        hlog!("[discord] Connected successfully");
         Ok(())
     }
 
@@ -165,7 +166,7 @@ impl DiscordManager {
         // Signal shutdown to the active channel
         if let Some(channel) = self.active_channel.write().await.take() {
             channel.shutdown();
-            eprintln!("[discord] Shutdown signal sent");
+            hlog!("[discord] Shutdown signal sent");
         }
 
         // Wait for the task to finish (with timeout)

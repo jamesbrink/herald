@@ -2,6 +2,7 @@ pub mod handlers;
 pub mod ws;
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use axum::http::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -85,6 +86,9 @@ pub struct AppState {
     pub update_checker: Arc<UpdateChecker>,
     /// Data directory for staging update downloads.
     pub data_dir: PathBuf,
+    /// Count of active interactive chat requests.
+    /// Used by the cron callback to defer execution when chat is active.
+    pub interactive_count: Arc<AtomicUsize>,
 }
 
 // ---------------------------------------------------------------------------

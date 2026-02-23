@@ -1,4 +1,6 @@
+use crate::hlog;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsRawMessage, WebSocket, WebSocketUpgrade};
@@ -15,6 +17,20 @@ use orra::runtime::RuntimeStreamEvent;
 
 use super::handlers::extract_bearer;
 use super::AppState;
+
+// ---------------------------------------------------------------------------
+// Interactive-request guard (RAII counter)
+// ---------------------------------------------------------------------------
+
+/// Decrements `interactive_count` when dropped, ensuring the counter stays
+/// correct even on early returns or panics inside the spawned runtime task.
+struct InteractiveGuard(Arc<AtomicUsize>);
+
+impl Drop for InteractiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // WebSocket upgrade handler
@@ -47,6 +63,7 @@ pub async fn ws_handler(
 // ---------------------------------------------------------------------------
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    hlog!("[ws] client connected");
     let mut session_rx = state.session_events.subscribe();
 
     // Channel for the spawned runtime task to send results back to this handler
@@ -65,7 +82,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         let _ = socket.send(WsRawMessage::Pong(data)).await;
                         continue;
                     }
-                    Some(Ok(WsRawMessage::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(WsRawMessage::Close(_))) | Some(Err(_)) | None => {
+                        hlog!("[ws] client disconnected");
+                        break;
+                    }
                     _ => continue,
                 };
 
@@ -87,6 +107,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             format!("web:{}", uuid::Uuid::new_v4())
                         });
                         let ns = Namespace::parse(&ns_key);
+                        hlog!(
+                            "[ws] chat: ns={}, agent={:?}, model={:?}, instance={:?}, msg_len={}",
+                            ns_key,
+                            agent,
+                            model,
+                            instance,
+                            message.len()
+                        );
 
                         // If `instance` is set and doesn't match local, proxy to the remote peer's session
                         if let Some(ref remote_instance) = instance {
@@ -202,6 +230,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                         // Resolve which runtime to use based on the agent name
                         let (runtime, agent_name) = resolve_runtime(&state, resolved_agent.as_deref()).await;
+                        hlog!("[ws] dispatching to agent={:?}, ns={}", agent_name, ns_key);
 
                         // Spawn the runtime on a separate task so approval hooks
                         // don't deadlock the WS handler
@@ -209,7 +238,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         let ns_key_clone = ns_key.clone();
                         let agent_name_clone = agent_name.clone();
 
+                        // Track that an interactive chat is in-flight so cron
+                        // jobs can defer and avoid API-key contention.
+                        state.interactive_count.fetch_add(1, Ordering::Relaxed);
+                        let _guard = InteractiveGuard(state.interactive_count.clone());
+
                         tokio::spawn(async move {
+                            // _guard is moved into this task; its Drop decrements the counter.
+                            let _guard = _guard;
+                            hlog!("[ws] runtime task started: ns={}", ns_key_clone);
                             // Try streaming first, fall back to non-streaming
                             match runtime
                                 .run_streaming_with_model(&ns, Message::user(&cleaned_message), model.clone())
@@ -227,6 +264,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                 }
                                             }
                                             RuntimeStreamEvent::Done(result) => {
+                                                hlog!(
+                                                    "[ws] stream done: ns={}, turns={}, tokens={}",
+                                                    ns_key_clone,
+                                                    result.turns.len(),
+                                                    result.total_usage.total_tokens()
+                                                );
                                                 WsMessage::Response {
                                                     message: result.final_message.content.clone(),
                                                     namespace: ns_key_clone.clone(),
@@ -239,6 +282,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                 }
                                             }
                                             RuntimeStreamEvent::Error(err) => {
+                                                hlog!("[ws] stream error: ns={}, err={}", ns_key_clone, err);
                                                 WsMessage::Error { error: err }
                                             }
                                             _ => continue,
@@ -249,10 +293,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                         }
                                     }
                                 }
-                                Err(_) => {
+                                Err(e) => {
                                     // Streaming not available, fall back to non-streaming
-                                    let ws_msg = match runtime.run_with_model(&ns, Message::user(&cleaned_message), model).await {
+                                    hlog!("[ws] streaming unavailable ({}), falling back to non-streaming: ns={}", e, ns_key_clone);
+                                    let ws_msg = match runtime.run_with_model(&ns, Message::user(&cleaned_message), model, None).await {
                                         Ok(result) => {
+                                            hlog!(
+                                                "[ws] non-stream done: ns={}, turns={}, tokens={}",
+                                                ns_key_clone,
+                                                result.turns.len(),
+                                                result.total_usage.total_tokens()
+                                            );
                                             WsMessage::Response {
                                                 message: result.final_message.content.clone(),
                                                 namespace: ns_key_clone,
@@ -265,6 +316,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                             }
                                         }
                                         Err(e) => {
+                                            hlog!("[ws] non-stream error: ns={}, err={}", ns_key_clone, e);
                                             WsMessage::Error {
                                                 error: e.to_string(),
                                             }

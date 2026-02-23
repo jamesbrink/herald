@@ -5,6 +5,7 @@
 // standalone binaries, and background polling.
 // ---------------------------------------------------------------------------
 
+use crate::hlog;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -286,7 +287,7 @@ pub async fn download_and_install(
 
     // Determine the expected asset name for this platform
     let asset_name = platform_asset_name()?;
-    eprintln!("[update] looking for asset: {}", asset_name);
+    hlog!("[update] looking for asset: {}", asset_name);
 
     // Find the matching asset in the release
     let asset = update_info
@@ -312,7 +313,7 @@ pub async fn download_and_install(
 
     // Download the new binary to a staging path
     let staging_path = data_dir.join(format!("herald-update-{}", update_info.latest_version));
-    eprintln!(
+    hlog!(
         "[update] downloading {} to {}",
         asset.download_url,
         staging_path.display()
@@ -341,7 +342,7 @@ pub async fn download_and_install(
     std::fs::write(&staging_path, &bytes)
         .map_err(|e| format!("failed to write staging file: {}", e))?;
 
-    eprintln!(
+    hlog!(
         "[update] downloaded {} bytes",
         bytes.len()
     );
@@ -356,12 +357,12 @@ pub async fn download_and_install(
         .find(|a| a.name == "checksums.sha256");
 
     if checksums_asset.is_some() {
-        eprintln!(
+        hlog!(
             "[update] WARNING: checksums.sha256 found but SHA256 verification is not yet \
              implemented — skipping integrity check"
         );
     } else {
-        eprintln!("[update] no checksums.sha256 asset found, skipping integrity check");
+        hlog!("[update] no checksums.sha256 asset found, skipping integrity check");
     }
 
     // --- Binary replacement ---
@@ -370,7 +371,7 @@ pub async fn download_and_install(
 
     let backup_path = PathBuf::from(format!("{}.bak", current_exe.display()));
 
-    eprintln!(
+    hlog!(
         "[update] replacing {} (backup: {})",
         current_exe.display(),
         backup_path.display()
@@ -383,14 +384,14 @@ pub async fn download_and_install(
     // Copy the downloaded binary to the original path
     if let Err(e) = std::fs::copy(&staging_path, &current_exe) {
         // Attempt to restore the backup
-        eprintln!("[update] ERROR: failed to install new binary: {}", e);
+        hlog!("[update] ERROR: failed to install new binary: {}", e);
         if let Err(restore_err) = std::fs::rename(&backup_path, &current_exe) {
-            eprintln!(
+            hlog!(
                 "[update] CRITICAL: failed to restore backup: {} — manual intervention required",
                 restore_err
             );
         } else {
-            eprintln!("[update] restored backup successfully");
+            hlog!("[update] restored backup successfully");
         }
         return Err(format!("failed to install new binary: {}", e));
     }
@@ -406,7 +407,7 @@ pub async fn download_and_install(
     // Clean up the staging file
     let _ = std::fs::remove_file(&staging_path);
 
-    eprintln!(
+    hlog!(
         "[update] successfully installed v{} — restart required",
         update_info.latest_version
     );
@@ -461,12 +462,12 @@ impl UpdateChecker {
         *self.last_check.write().await = Some(chrono::Utc::now());
 
         if info.update_available {
-            eprintln!(
+            hlog!(
                 "[update] new version available: v{} -> v{} ({})",
                 info.current_version, info.latest_version, info.release_url
             );
         } else {
-            eprintln!(
+            hlog!(
                 "[update] up to date (v{})",
                 info.current_version
             );
@@ -485,7 +486,7 @@ impl UpdateChecker {
         let repo = self.github_repo.clone();
 
         tokio::spawn(async move {
-            eprintln!(
+            hlog!(
                 "[update] background checker started (interval: {}s, repo: {})",
                 interval_secs, repo
             );
@@ -494,7 +495,7 @@ impl UpdateChecker {
                 match check_for_update().await {
                     Ok(info) => {
                         if info.update_available {
-                            eprintln!(
+                            hlog!(
                                 "[update] new version available: v{} -> v{} ({})",
                                 info.current_version, info.latest_version, info.release_url
                             );
@@ -503,7 +504,7 @@ impl UpdateChecker {
                         *last_check.write().await = Some(chrono::Utc::now());
                     }
                     Err(e) => {
-                        eprintln!("[update] background check failed: {}", e);
+                        hlog!("[update] background check failed: {}", e);
                         // Keep the previous cached result, just log the error
                     }
                 }
