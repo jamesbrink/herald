@@ -1,33 +1,33 @@
 //! Remote delegation tool — allows agents to delegate tasks to remote peers.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use orra::channels::federation::RelayRequest;
 use orra::tool::{Tool, ToolDefinition, ToolError};
 
 use super::client::PeerClient;
-use super::PeerRegistry;
+use super::manager::FederationManager;
 
 /// Tool that lets an agent delegate a task to a remote agent on a federated peer.
 ///
 /// Follows the same pattern as `DelegateToAgentTool` but routes across instances.
+/// Holds a reference to `FederationManager` so it always uses the latest service
+/// after a hot-reload.
 pub struct DelegateToRemoteAgentTool {
-    /// The peer registry to look up remote agents.
-    registry: PeerRegistry,
-    /// Instance name of the local herald (used as source_peer in relay requests).
-    instance_name: String,
+    /// The federation manager to get the current service and registry.
+    manager: Arc<FederationManager>,
     /// Name of the agent that owns this tool (for source_agent in relay).
     self_agent: String,
 }
 
 impl DelegateToRemoteAgentTool {
     pub fn new(
-        registry: PeerRegistry,
-        instance_name: String,
+        manager: Arc<FederationManager>,
         self_agent: String,
     ) -> Self {
         Self {
-            registry,
-            instance_name,
+            manager,
             self_agent,
         }
     }
@@ -71,6 +71,14 @@ impl Tool for DelegateToRemoteAgentTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing 'task'".into()))?;
 
+        // Get the current federation service
+        let service = self.manager.service().await.ok_or_else(|| {
+            ToolError::ExecutionFailed("Federation is not currently running".into())
+        })?;
+
+        let registry = service.registry();
+        let instance_name = service.instance_name().to_string();
+
         // Parse target: "peer:agent" or just "agent"
         let (peer, agent_name) = if let Some((p, a)) = target.split_once(':') {
             (Some(p), a)
@@ -80,13 +88,13 @@ impl Tool for DelegateToRemoteAgentTool {
 
         // Look up the remote agent
         let (url, secret, info) =
-            self.registry
+            registry
                 .find_agent(peer, agent_name)
                 .await
                 .ok_or_else(|| {
                     let available = tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
-                            let agents = self.registry.remote_agents().await;
+                            let agents = registry.remote_agents().await;
                             agents
                                 .iter()
                                 .map(|a| format!("{}:{}", a.instance, a.name))
@@ -110,11 +118,11 @@ impl Tool for DelegateToRemoteAgentTool {
         let request = RelayRequest {
             agent: info.name.clone(),
             message: task.to_string(),
-            source_peer: self.instance_name.clone(),
+            source_peer: instance_name,
             source_agent: Some(self.self_agent.clone()),
             namespace: format!(
                 "federation:{}:{}",
-                self.instance_name,
+                self.self_agent,
                 uuid::Uuid::new_v4()
             ),
         };

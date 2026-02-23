@@ -90,14 +90,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                         // If `instance` is set and doesn't match local, proxy to the remote peer's session
                         if let Some(ref remote_instance) = instance {
-                            let is_local = state
-                                .federation_service
+                            let fed_svc = state.federation_manager.service().await;
+                            let is_local = fed_svc
                                 .as_ref()
                                 .map(|f| f.instance_name() == remote_instance.as_str())
                                 .unwrap_or(true); // no federation = treat as local
 
                             if !is_local {
-                                if let Some(ref fed) = state.federation_service {
+                                if let Some(ref fed) = fed_svc {
                                     let peers = fed.registry().list_peers().await;
                                     if let Some(peer) = peers.iter().find(|p| &p.name == remote_instance) {
                                         let request = orra::channels::federation::SessionChatRequest {
@@ -147,7 +147,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         }
 
                         // Check for @peer:agent pattern (federation direct routing)
-                        if let Some(ref fed) = state.federation_service {
+                        let fed_svc2 = state.federation_manager.service().await;
+                        if let Some(ref fed) = fed_svc2 {
                             if let Some(remote_match) = detect_remote_agent_mention(&message, fed).await {
                                 let result_tx = result_tx.clone();
                                 let ns_key_clone = ns_key.clone();

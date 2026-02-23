@@ -231,8 +231,8 @@ pub async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) ->
                         .get("chaos_mode")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    let instance = state
-                        .federation_service
+                    let fed_service = state.federation_manager.service().await;
+                    let instance = fed_service
                         .as_ref()
                         .map(|f| f.instance_name().to_string());
 
@@ -251,7 +251,8 @@ pub async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) ->
             }
 
             // Aggregate remote sessions from federated peers
-            if let Some(ref fed) = state.federation_service {
+            let fed_svc = state.federation_manager.service().await;
+            if let Some(ref fed) = fed_svc {
                 let peers = fed.registry().list_peers().await;
                 let healthy_peers: Vec<_> = peers
                     .into_iter()
@@ -347,14 +348,14 @@ pub async fn get_session(
 
     // If an instance is specified and it doesn't match local, proxy to the remote peer
     if let Some(ref remote_instance) = query.instance {
-        let is_local = state
-            .federation_service
+        let fed_svc = state.federation_manager.service().await;
+        let is_local = fed_svc
             .as_ref()
             .map(|f| f.instance_name() == remote_instance.as_str())
             .unwrap_or(false);
 
         if !is_local {
-            if let Some(ref fed) = state.federation_service {
+            if let Some(ref fed) = fed_svc {
                 let peers = fed.registry().list_peers().await;
                 if let Some(peer) = peers.iter().find(|p| p.name == *remote_instance) {
                     match crate::federation::client::PeerClient::get_session(
@@ -530,7 +531,8 @@ pub async fn get_settings(State(state): State<AppState>, headers: HeaderMap) -> 
         })
     };
 
-    let federation = if let Some(ref fed) = state.federation_service {
+    let fed_service = state.federation_manager.service().await;
+    let federation = if let Some(ref fed) = fed_service {
         let peers = fed.registry().list_peers().await;
         let remote_agents = fed.registry().remote_agents().await;
 
@@ -1090,11 +1092,63 @@ pub async fn update_federation(
 
     eprintln!("[settings] Federation settings saved to config file");
 
+    // Hot-reload: apply the new settings at runtime
+    if request.enabled {
+        // Read back the full saved config
+        let fed_config = match config::read_federation_settings(&state.config_path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Settings saved but failed to reload config: {}", e),
+                        code: "config_read_error".into(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+
+        // Build local agent info from current agent profiles
+        let profiles = state.agent_profiles.read().await;
+        let local_agents: Vec<crate::federation::LocalAgentInfo> = profiles
+            .iter()
+            .map(|a| crate::federation::LocalAgentInfo {
+                name: a.name.clone(),
+                personality: a.personality.clone(),
+                model: state.config_model.clone(),
+            })
+            .collect();
+        drop(profiles);
+
+        // Restart federation with new config
+        if let Err(e) = state
+            .federation_manager
+            .restart(fed_config, local_agents, state.gateway_port)
+            .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Settings saved but federation restart failed: {}", e),
+                    code: "federation_restart_error".into(),
+                }),
+            )
+                .into_response();
+        }
+
+        eprintln!("[settings] Federation restarted with new settings");
+    } else {
+        // Federation disabled — stop it
+        state.federation_manager.stop().await;
+        eprintln!("[settings] Federation stopped");
+    }
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "success": true,
-            "restart_required": true,
+            "restart_required": false,
         })),
     )
         .into_response()
@@ -2119,7 +2173,8 @@ pub async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> i
         .collect();
 
     // Include remote agents from federation
-    if let Some(ref fed) = state.federation_service {
+    let fed_svc = state.federation_manager.service().await;
+    if let Some(ref fed) = fed_svc {
         let remote = fed.registry().remote_agents().await;
         for ra in remote {
             agents.push(serde_json::json!({

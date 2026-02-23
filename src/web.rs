@@ -23,7 +23,7 @@ use orra::tools::discord::DiscordConfig as DiscordApiConfig;
 
 use crate::config::{AgentProfileConfig, GatewayConfig};
 use crate::discord_manager::DiscordManager;
-use crate::federation::FederationService;
+use crate::federation::manager::FederationManager;
 use crate::provider_wrapper::DynamicProvider;
 use crate::update::UpdateChecker;
 
@@ -77,8 +77,10 @@ pub struct AppState {
     pub approval_rx: Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::hooks::approval::ApprovalRequest>>,
     >,
-    /// Federation service (None if federation is disabled).
-    pub federation_service: Option<Arc<FederationService>>,
+    /// Federation manager — handles hot-reload of federation settings.
+    pub federation_manager: Arc<FederationManager>,
+    /// The gateway port (needed for federation port computation on hot-reload).
+    pub gateway_port: u16,
     /// Background update checker for version monitoring.
     pub update_checker: Arc<UpdateChecker>,
     /// Data directory for staging update downloads.

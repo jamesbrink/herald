@@ -357,28 +357,15 @@ async fn main() {
     // reference it even before the map is populated.
     let runtimes = Arc::new(tokio::sync::RwLock::new(runtimes_map.clone()));
 
-    // --- Federation service (created before agent build so tools can reference it) ---
-    let federation_service: Option<Arc<federation::FederationService>> =
-        if config.federation.enabled {
-            let local_agents: Vec<federation::LocalAgentInfo> = agents
-                .iter()
-                .map(|a| federation::LocalAgentInfo {
-                    name: a.name.clone(),
-                    personality: a.personality.clone(),
-                    model: config.provider.model.clone(),
-                })
-                .collect();
-
-            Some(Arc::new(federation::FederationService::new(
-                config.federation.clone(),
-                local_agents,
-            )))
-        } else {
-            None
-        };
+    // --- Federation manager (created before agent build so tools can reference it) ---
+    let federation_manager = Arc::new(federation::manager::FederationManager::new(
+        runtimes.clone(),
+        store.clone(),
+    ));
 
     // Auto-enable delegation when multiple agents are configured
     let enable_delegation = config.tools.delegation || agents.len() > 1;
+    let enable_federation_tool = config.federation.enabled;
 
     if agents.len() > 1 {
         eprintln!("[init] multi-agent mode: {} agents", agents.len());
@@ -389,7 +376,7 @@ async fn main() {
         // If federation is enabled, include a hint about remote agents in the system prompt.
         // Actual remote agent names are discovered at runtime, so we just describe the capability.
         let federation_remote_agents: Vec<identity::RemoteAgentDesc> =
-            if federation_service.is_some() {
+            if config.federation.enabled {
                 // At startup, static peers are seeded but not yet discovered.
                 // We pass an empty list — the tool description handles discovery.
                 // If we have static peer names, include a placeholder.
@@ -450,11 +437,10 @@ async fn main() {
             }
 
             // Register remote delegation tool (federation)
-            if let Some(ref fed_service) = federation_service {
+            if enable_federation_tool {
                 agent_tool_registry.register(Box::new(
                     federation::tool::DelegateToRemoteAgentTool::new(
-                        fed_service.registry().clone(),
-                        fed_service.instance_name().to_string(),
+                        federation_manager.clone(),
                         agent_profile.name.clone(),
                     ),
                 ));
@@ -501,43 +487,29 @@ async fn main() {
     let default_agent = Arc::new(tokio::sync::RwLock::new(default_agent_name.clone()));
 
     // --- Federation startup ---
-    let _federation_handles = if let Some(ref fed_service) = federation_service {
-        let federation_port = fed_service.port(config.gateway.port);
-        let handles = fed_service.start(config.gateway.port).await;
+    if config.federation.enabled {
+        let local_agents: Vec<federation::LocalAgentInfo> = agents
+            .iter()
+            .map(|a| federation::LocalAgentInfo {
+                name: a.name.clone(),
+                personality: a.personality.clone(),
+                model: config.provider.model.clone(),
+            })
+            .collect();
 
-        // Start the federation HTTP API server
-        let fed_state = federation::api::FederationState {
-            service: fed_service.clone(),
-            runtimes: runtimes.clone(),
-            store: store.clone(),
-        };
-        let fed_router = federation::api::federation_router(fed_state);
-        let fed_addr = format!("0.0.0.0:{federation_port}");
-        tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(&fed_addr).await {
-                Ok(listener) => {
-                    eprintln!("[federation] API listening on http://{fed_addr}");
-                    if let Err(e) = axum::serve(listener, fed_router).await {
-                        eprintln!("[federation] API server error: {e}");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[federation] Failed to bind {fed_addr}: {e}");
-                }
-            }
-        });
-
-        eprintln!(
-            "[init] federation: enabled (instance: '{}', {} static peers, port: {})",
-            fed_service.instance_name(),
-            config.federation.peers.len(),
-            federation_port,
-        );
-
-        Some(handles)
-    } else {
-        None
-    };
+        if let Err(e) = federation_manager
+            .start(config.federation.clone(), local_agents, config.gateway.port)
+            .await
+        {
+            eprintln!("[init] federation: failed to start: {e}");
+        } else {
+            eprintln!(
+                "[init] federation: enabled (instance: '{}', {} static peers)",
+                config.federation.instance_name,
+                config.federation.peers.len(),
+            );
+        }
+    }
 
     // --- Scheduler ---
     let _scheduler_handle = if config.scheduler.enabled && !config.scheduler.jobs.is_empty() {
@@ -730,7 +702,8 @@ async fn main() {
         default_agent: default_agent.clone(),
         agent_profiles: agent_profiles.clone(),
         approval_rx: Arc::new(tokio::sync::Mutex::new(approval_rx)),
-        federation_service: federation_service.clone(),
+        federation_manager: federation_manager.clone(),
+        gateway_port: config.gateway.port,
         update_checker,
         data_dir: config.data_dir.clone(),
     };

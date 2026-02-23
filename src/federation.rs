@@ -13,6 +13,7 @@
 pub mod api;
 pub mod client;
 pub mod discovery;
+pub mod manager;
 pub mod tool;
 
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 
 use orra::channels::federation::RemoteAgentInfo;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::FederationConfig;
 
@@ -285,9 +287,16 @@ impl FederationService {
 
     /// Start background tasks: static peer sync, health checks, mDNS.
     ///
+    /// Accepts a `CancellationToken` for cooperative shutdown. When the token
+    /// is cancelled, all background loops will exit gracefully.
+    ///
     /// Returns join handles for the spawned tasks. Caller should store them
     /// to await or cancel on shutdown.
-    pub async fn start(&self, gateway_port: u16) -> Vec<tokio::task::JoinHandle<()>> {
+    pub async fn start(
+        &self,
+        gateway_port: u16,
+        cancel_token: CancellationToken,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = Vec::new();
 
         // Seed registry with static peers
@@ -315,6 +324,7 @@ impl FederationService {
             let registry = self.registry.clone();
             let peers: Vec<_> = self.config.peers.clone();
             let global_secret = global_secret.clone();
+            let token = cancel_token.clone();
             handles.push(tokio::spawn(async move {
                 loop {
                     for peer_config in &peers {
@@ -345,7 +355,13 @@ impl FederationService {
                             }
                         }
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            eprintln!("[federation] peer discovery task shutting down");
+                            break;
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                    }
                 }
             }));
         }
@@ -353,9 +369,16 @@ impl FederationService {
         // Background task: health check all peers (every 30s)
         {
             let registry = self.registry.clone();
+            let token = cancel_token.clone();
             handles.push(tokio::spawn(async move {
                 // Initial delay to let discovery run first
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        eprintln!("[federation] health check task shutting down (during initial delay)");
+                        return;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
+                }
                 loop {
                     let peers = registry.list_peers().await;
                     for peer in &peers {
@@ -369,7 +392,13 @@ impl FederationService {
                             }
                         }
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            eprintln!("[federation] health check task shutting down");
+                            break;
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                    }
                 }
             }));
         }
@@ -380,9 +409,11 @@ impl FederationService {
 
             // Register our service
             let instance_name = self.config.instance_name.clone();
+            let register_token = cancel_token.clone();
             let register_handle = tokio::spawn(async move {
                 if let Err(e) =
-                    discovery::register_service(&instance_name, federation_port).await
+                    discovery::register_service(&instance_name, federation_port, register_token)
+                        .await
                 {
                     eprintln!("[federation] mDNS registration failed: {e}");
                 }
@@ -393,9 +424,15 @@ impl FederationService {
             let registry = self.registry.clone();
             let own_instance = self.config.instance_name.clone();
             let global_secret = global_secret.clone();
+            let browse_token = cancel_token.clone();
             let browse_handle = tokio::spawn(async move {
-                if let Err(e) =
-                    discovery::browse_peers(registry, &own_instance, &global_secret).await
+                if let Err(e) = discovery::browse_peers(
+                    registry,
+                    &own_instance,
+                    &global_secret,
+                    browse_token,
+                )
+                .await
                 {
                     eprintln!("[federation] mDNS browsing failed: {e}");
                 }
