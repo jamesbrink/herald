@@ -543,7 +543,21 @@
             font-weight: 400;
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 4px;
+            margin-left: auto;
+        }
+
+        .conn-group {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .conn-sep {
+            color: var(--border);
+            margin: 0 2px;
+            font-size: 10px;
+            user-select: none;
         }
 
         .status-dot {
@@ -551,11 +565,37 @@
             height: 8px;
             border-radius: 50%;
             background: #ccc;
+            flex-shrink: 0;
         }
 
-        .status-dot.connected { background: #34a853; }
-        .status-dot.disconnected { background: #d93025; }
-        .status-dot.connecting { background: #fbbc05; }
+        .status-dot.connected, .status-dot.healthy { background: #34a853; }
+        .status-dot.disconnected, .status-dot.unhealthy { background: #d93025; }
+        .status-dot.connecting, .status-dot.unknown { background: #fbbc05; }
+
+        .conn-label {
+            color: var(--text-secondary);
+            font-size: 10px;
+            white-space: nowrap;
+        }
+
+        .fed-peers-status {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+
+        .fed-peer-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            white-space: nowrap;
+        }
+
+        .fed-peer-indicator .peer-name {
+            font-size: 11px;
+            color: var(--text-primary);
+        }
 
         .messages {
             flex: 1;
@@ -1695,8 +1735,12 @@
                 <span>&#9889; Chaos</span>
             </label>
             <div class="connection-status">
-                <div class="status-dot" id="statusDot"></div>
-                <span id="statusText">Connecting...</span>
+                <div class="conn-group">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">Connecting...</span>
+                </div>
+                <span class="conn-sep" id="fedSep" style="display:none">|</span>
+                <div class="fed-peers-status" id="fedPeersStatus" style="display:none"></div>
             </div>
         </div>
         <div class="messages" id="messages">
@@ -2143,6 +2187,61 @@
             const text = document.getElementById('statusText');
             dot.className = `status-dot ${status}`;
             text.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Federation connection status (header bar)
+        // ---------------------------------------------------------------------------
+        let fedStatusInterval = null;
+
+        function startFedStatusPolling() {
+            // Poll immediately, then every 15 seconds
+            updateFedConnectionStatus();
+            if (fedStatusInterval) clearInterval(fedStatusInterval);
+            fedStatusInterval = setInterval(updateFedConnectionStatus, 15000);
+        }
+
+        async function updateFedConnectionStatus() {
+            try {
+                const headers = {};
+                if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+                const resp = await fetch('/api/settings', { headers });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const fed = data.federation;
+
+                const sep = document.getElementById('fedSep');
+                const container = document.getElementById('fedPeersStatus');
+
+                if (!fed || !fed.enabled) {
+                    sep.style.display = 'none';
+                    container.style.display = 'none';
+                    return;
+                }
+
+                const livePeers = fed.live_peers || [];
+                if (livePeers.length === 0) {
+                    sep.style.display = 'none';
+                    container.style.display = 'none';
+                    return;
+                }
+
+                sep.style.display = '';
+                container.style.display = 'flex';
+                container.innerHTML = '';
+
+                livePeers.forEach((peer, i) => {
+                    const healthClass = peer.health === 'Healthy' ? 'healthy' :
+                                        peer.health === 'Unhealthy' ? 'unhealthy' : 'unknown';
+                    const indicator = document.createElement('span');
+                    indicator.className = 'fed-peer-indicator';
+                    indicator.title = `${peer.name}: ${peer.health}\n${peer.url}`;
+                    indicator.innerHTML = `<span class="status-dot ${healthClass}"></span><span class="peer-name">${escapeHtml(peer.name)}</span>`;
+                    container.appendChild(indicator);
+                });
+            } catch (e) {
+                // Silently ignore — don't disrupt the UI on network errors
+            }
         }
 
         // ---------------------------------------------------------------------------
@@ -4153,6 +4252,7 @@
                 connectWebSocket();
                 await loadSessions();
                 loadAgentSelector();
+                startFedStatusPolling();
             } catch (e) {
                 errEl.textContent = `Connection error: ${e.message}`;
                 errEl.style.display = 'block';
@@ -4198,7 +4298,7 @@
                 await loadSessions();
                 loadAgentSelector();
 
-                // Set page title to "Herald - {instance_name}"
+                // Set page title and kick off federation status polling
                 try {
                     const headers = {};
                     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -4212,6 +4312,7 @@
                         }
                     }
                 } catch (e) { /* keep default title */ }
+                startFedStatusPolling();
 
                 // Auto-select the most recent session if one exists
                 if (cachedSessions.length > 0) {
